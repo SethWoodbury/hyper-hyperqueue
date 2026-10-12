@@ -1,0 +1,4 @@
+# Each nonblank, non-comment line is an independent task.
+python -c 'import os,time; print("first", os.environ["HHQ_TASK_ID"]); time.sleep(2)'
+python -c 'import time; print("second"); time.sleep(2)'
+printf '%s\n' 'literal quote, spaces, and $HOME are preserved'

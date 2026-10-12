@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hyper-hyperqueue"
+version = "0.1.0"
+description = "A small, explicit Slurm allocation layer around HyperQueue, with direct arrays."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+authors = [{name = "Seth Woodbury"}]
+dependencies = ["pydantic>=2.10,<3", "typer>=0.15,<1", "rich>=13,<15", "PyYAML>=6,<7", "psutil>=6,<8"]
+
+[project.optional-dependencies]
+hq = ["hyperqueue==0.26.2"]
+
+[project.scripts]
+hhq = "hyper_hyperqueue.cli:entrypoint"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: real HyperQueue subprocess tests", "cluster: explicitly launched Slurm probes"]
+
+[tool.ruff]
+line-length = 110

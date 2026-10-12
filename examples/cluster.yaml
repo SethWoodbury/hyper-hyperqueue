@@ -1,0 +1,66 @@
+# Sanitized example. Check partition/GRES names and association permissions
+# with hhq discover before use. These are operator budgets, not site limits.
+schema_version: 1
+cluster: example
+state_dir: ~/.local/state/hyper-hyperqueue-example
+control:
+  hosting: slurm
+  partition: cpu
+  cpus: 1
+  memory_mib: 1024
+  walltime_seconds: 86400
+  standby_replicas: 0
+policy:
+  reconcile_interval_seconds: 45
+  max_submissions_per_cycle: 2
+  max_direct_submitted: 16
+budgets:
+  cpu:
+    partitions: [cpu]
+    running_target: 3
+    pending_reserve: 1
+    max_submitted: 4
+    source: explicit example operator budget
+  gpu:
+    partitions: [gpu]
+    running_target: 1
+    pending_reserve: 1
+    max_submitted: 2
+    source: explicit example operator budget
+profiles:
+  cpu-direct:
+    partition: cpu
+    budget: cpu
+    execution_mode: direct
+    cpus: 1
+    memory_mib: 1024
+    allocation_seconds: 3600
+  cpu-pool:
+    partition: cpu
+    budget: cpu
+    execution_mode: pooled
+    cpus: 4
+    memory_mib: 4352  # four 1-GiB tasks + 256-MiB worker reserve
+    allocation_seconds: 28800
+    max_workers: 2
+  gpu-small:
+    partition: gpu
+    budget: gpu
+    execution_mode: pooled
+    gres: gpu:small:1
+    cpus: 1
+    memory_mib: 12544
+    allocation_seconds: 28800
+    max_workers: 2
+  gpu-large:
+    partition: gpu
+    budget: gpu
+    execution_mode: pooled
+    gres: gpu:large:1
+    cpus: 1
+    memory_mib: 12544
+    allocation_seconds: 28800
+    max_workers: 2
+workloads:
+  cpu: [cpu-direct, cpu-pool]
+  gpu-flex: [gpu-small, gpu-large]

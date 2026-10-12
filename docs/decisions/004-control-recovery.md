@@ -1,0 +1,11 @@
+# ADR 004: single journal writer, verified failover
+
+Accepted 2026-10-12. A supervisor owns a whole-lifetime `flock` on a stable, never-replaced lock inode. HQ and its separately restartable controller inherit the descriptor and a Linux parent-death signal. The controller checks its epoch and inherited descriptor before external mutation. Restarting the controller does not restart HQ.
+
+The heartbeat is diagnostic, not a lease. Before takeover, a candidate must prove exact previous control and worker allocations terminal, including pending/unacknowledged worker intents, then acquire the lifetime lock and increment the durable epoch. Missing accounting, inaccessible storage, uncertain ownership, or a live old process blocks takeover. HQ journal restoration does not preserve live workers; replay of arbitrary side effects is not exactly once. The common runner's durable completion fingerprints, output policy, and bounded retries determine which interrupted tasks can run again.
+
+Automatic Slurm standby is disabled unless an unexpired receipt binds real cross-node lock exclusion, lock release after owner loss, actual HQ connectivity, and exact control/worker fencing to the same state directory. A local synthetic unit test is not a substitute. The readiness receipt and its evidence hashes are checked before enabling standby and again before recovery. Production state directories require their own evidence.
+
+When enabled, the active owner maintains at most two control allocations. Only terminal accounting frees a slot; uncertain submissions block replacement. Replacement standby submissions prefer a node other than the active node. Initial placement is not guaranteed distinct by Slurm. Before control walltime, `USR1` stops admissions and drains bounded-lifetime workers. A standby can restore the journal only after positive fencing and lock acquisition, then replenish one standby. An expiring standby exits without fencing a healthy owner. Without verified standby, a drained or failed service requires an explicit restart and may remain blocked until old workers are positively fenced.
+
+Read `docs/recovery.md` for tested behavior and limitations. A receipt describes a tested setup, not a universal guarantee about NFS or every future network partition.

@@ -1,0 +1,2 @@
+{"argv": ["python", "-c", "print('An argv command: no shell expansion')"]}
+{"command": "printf 'first line\\n'\nprintf 'second line\\n'"}
