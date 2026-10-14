@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .backends.hyperqueue import check_version, locate_binary, resource_label
 from .gpu import query_assigned_devices
+from .startup_probe import run_startup_probe
 
 
 def detect_assigned(profile, *, environment=None, affinity=None, gpu_query=None) -> dict:
@@ -209,7 +210,8 @@ def select_fallback(store, config, primary, assigned, epoch, token, remaining, *
     for target in config.profiles[primary].fallback_profiles:
         if primary in controls.get("paused_pools", []) or target in controls.get("paused_pools", []):
             continue
-        placement = ("partition", "account", "qos", "gres", "constraint", "exclude", "gpu_models", "min_vram_mib")
+        placement = ("partition", "account", "qos", "gres", "constraint", "exclude", "gpu_models", "min_vram_mib",
+                     "startup_probe_argv", "startup_probe_timeout_seconds")
         if any(getattr(config.profiles[target], key) != getattr(config.profiles[primary], key) for key in placement):
             continue  # An alias cannot bypass a task's permitted hardware or queue.
         physical = config.profiles[primary].model_copy(update={
@@ -283,7 +285,12 @@ def main(argv=None):
     atomic_json(preflight_path, preflight)
     try:
         assigned = detect_assigned(config.profiles[args.profile])
+        probe = run_startup_probe(config.profiles[args.profile])
+        if probe is not None:
+            preflight["startup_probe"] = probe
     except Exception as error:
+        if hasattr(error, "result"):
+            preflight["startup_probe"] = error.result
         atomic_json(
             preflight_path,
             {

@@ -52,6 +52,9 @@ These limits are reflected in errors/defaults rather than claims of untested fun
   restrictions and actual hardware fit; they are not cross-partition migration.
 
 Application failures do not currently quarantine a healthy worker automatically.
+An optional profile `startup_probe_argv` can reject a broken application environment
+before HQ registration; it consumes no task and uses the existing startup circuit.
+It only tests the supplied command, not later model execution or GPU kernels.
 The allocation circuit breaker detects worker startup failures and rejected Slurm
 submissions; it is not a consecutive command-failure limit. A started HQ worker
 can therefore consume multiple commands that all fail during application/model

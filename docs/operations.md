@@ -148,6 +148,22 @@ Unknown submissions reserve capacity. First inspect the intent token, exact Slur
 
 After repairing a repeated worker startup error, use `hhq pool resume PROFILE --reset-startup-failures` to acknowledge the repair and reset that circuit's counting window. Old evidence stays intact. This does not clear an unknown submission or override a budget.
 
+A pooled profile can optionally check its application environment before joining HQ:
+
+```yaml
+startup_probe_argv: ["/usr/bin/apptainer", "exec", "--nv", "/path/to/pinned-image.sif", "/bin/true"]
+startup_probe_timeout_seconds: 30  # 1–300 seconds; empty argv disables the check.
+```
+
+The argv runs directly, with the allocation's existing GPU visibility and no shell
+or dependency installation. A failed or timed-out probe ends the worker before it
+can accept any task. Its preflight record retains the last 4 KiB of each output
+stream, byte counts and exit status; the existing worker startup circuit limits
+repeated failures. Probe children are removed on exit or timeout, so use a
+foreground check, never a daemon launcher. Fallback profiles must have identical
+probe settings. This check applies to pooled workers, not direct arrays, and a
+successful container launch does not qualify model inference on that GPU.
+
 ## Browser
 
 ```bash

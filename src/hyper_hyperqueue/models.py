@@ -113,6 +113,23 @@ class Profile(Model):
     max_workers: int = Field(4, ge=0)
     extra_sbatch: list[str] = Field(default_factory=list)
     fallback_profiles: list[str] = Field(default_factory=list)
+    startup_probe_argv: list[str] = Field(default_factory=list)
+    startup_probe_timeout_seconds: int = Field(30, ge=1, le=300, strict=True)
+
+    @model_validator(mode="after")
+    def valid_startup_probe(self):
+        if self.startup_probe_argv and (not self.startup_probe_argv[0]
+                                       or any("\0" in arg for arg in self.startup_probe_argv)):
+            raise ValueError("startup_probe_argv requires a nonempty executable and no NUL bytes")
+        return self
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_probe_default(self, handler):
+        value = handler(self)
+        if not self.startup_probe_argv and self.startup_probe_timeout_seconds == 30:
+            value.pop("startup_probe_argv", None)
+            value.pop("startup_probe_timeout_seconds", None)
+        return value
 
 
 class Budget(Model):
@@ -197,9 +214,10 @@ class Config(Model):
                 raise ValueError(f"Profile {name}: fallback profiles must name other configured profiles")
             for target in profile.fallback_profiles:
                 other = self.profiles[target]
-                placement = ("partition", "account", "qos", "gres", "constraint", "exclude", "gpu_models", "min_vram_mib")
+                placement = ("partition", "account", "qos", "gres", "constraint", "exclude", "gpu_models",
+                             "min_vram_mib", "startup_probe_argv", "startup_probe_timeout_seconds")
                 if any(getattr(profile, field) != getattr(other, field) for field in placement):
-                    raise ValueError(f"Profile {name}: fallback must use the same partition, account, QoS and hardware restrictions")
+                    raise ValueError(f"Profile {name}: fallback must use the same partition, account, QoS, hardware restrictions and startup probe")
         if self.policy.speculative_partition_workers:
             invalid = [name for name, profile in self.profiles.items() if "," in profile.partition]
             if invalid:
