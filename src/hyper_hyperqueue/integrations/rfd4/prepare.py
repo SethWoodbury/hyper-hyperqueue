@@ -19,7 +19,8 @@ from pathlib import Path
 import yaml
 
 from ...models import Resources, RetryPolicy
-from ...state import atomic_bytes, file_lock, fingerprint, json_bytes
+from ...state import atomic_bytes, ensure_directory, file_lock, fingerprint, json_bytes
+from .runtime import identity
 
 RUNTIME_SCRIPT = Path(__file__).with_name("runtime.py")
 HOST_SCRIPT = Path(__file__).with_name("host_runtime.py")
@@ -569,8 +570,22 @@ def _validate_plan(plan: dict) -> None:
     _verify(sources)
 
 
+def _prepare_output_sidecars(bundles):
+    """Create shared parents centrally, without claiming or opening scientific outputs."""
+    directories = set()
+    for bundle in bundles:
+        for row in bundle["rows"]:
+            output = _path(row["output_dir"])
+            sidecars = output.parent / ".hhq-rfd4"
+            directories.update((output.parent, sidecars, sidecars / identity({"output_dir": str(output)})))
+    # Establish every shared parent before its children. Workers otherwise race
+    # recursive mkdir across NFS clients with independently cached missing paths.
+    for path in sorted(directories, key=lambda value: (len(value.parts), str(value))):
+        ensure_directory(path)
+
+
 def prepare_sweep(plan: dict, directory) -> dict:
-    """Write an idempotent content-pinned package; never import or submit tasks."""
+    """Write pinned bundles and empty output sidecars; never import or submit tasks."""
     _validate_plan(plan)
     directory = _path(directory)
     payloads, bundle_files, grouped = {}, {}, {}
@@ -635,6 +650,7 @@ def prepare_sweep(plan: dict, directory) -> dict:
             existing = Path(path)
             if existing.exists() and (not existing.is_file() or existing.read_bytes() != data):
                 raise FileExistsError(f"Preserving different existing file: {path}; choose a new directory")
+        _prepare_output_sidecars(plan["bundles"])
         for path, data in payloads.items():
             if not Path(path).exists():
                 atomic_bytes(path, data)

@@ -74,6 +74,14 @@ resource_preview = submission.preview(prepared, config)
 receipt = submission.launch(prepared, config)
 ```
 
+Preparation also creates the empty output parents and hashed `.hhq-rfd4` row
+sidecar directories centrally, before publishing the package. This reduces
+concurrent recursive directory creation on NFS workers. It creates no scientific
+run directories, ownership records or completion receipts; those remain runtime
+checks. Repeating the same preparation restores missing empty parents without
+overwriting existing evidence. Planning and preview remain read-only. This is a
+startup-race mitigation, not a guarantee against shared-filesystem outages.
+
 `method_profiles` copies the existing partition, GRES, constraints, queue walltime, weights and budgets into method-specific profiles. It changes task host-RAM capacity plus the fixed worker reserve and ensures sufficient CPUs. Aliases are `rfd4-generate`, `rfd4-gradient`, `rfd4-beam`; use those in the options. Shared budgets are retained, not multiplied for each method. Set all method profiles **before** starting the service; HHQ rejects a changed configuration on an active service. Review the resolved configuration, including account/QoS and per-profile worker bounds, before launch.
 
 An optional top-level `log_dir` keeps console logs separate from authoritative

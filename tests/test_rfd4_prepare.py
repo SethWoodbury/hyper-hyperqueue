@@ -252,6 +252,80 @@ def test_prepare_is_idempotent_verified_and_refuses_conflicts(sweep):
         prepare.prepare_sweep(planned, output)
 
 
+def test_prepare_creates_exact_empty_runtime_sidecars_but_not_scientific_runs(sweep, monkeypatch):
+    from hyper_hyperqueue.integrations.rfd4.runtime import identity
+
+    planned = plan(sweep)
+    calls = []
+    original = prepare.ensure_directory
+
+    def create(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(prepare, "ensure_directory", create)
+    prepared = prepare.prepare_sweep(planned, sweep["root"] / "prepared")
+    for row in sweep["manifest"]["rows"]:
+        output = Path(row["output_dir"]).resolve()
+        parent = output.parent / ".hhq-rfd4"
+        sidecar = parent / identity({"output_dir": str(output)})
+        assert sidecar.is_dir()
+        assert list(sidecar.iterdir()) == []  # No owner, lock or success claim.
+        assert not output.exists()
+        assert calls.index(output.parent) < calls.index(parent) < calls.index(sidecar)
+    assert len(calls) == len(set(calls)) == 7
+    assert not any(path.is_file() for path in (sweep["root"] / "science").rglob("*"))
+    assert prepare.verify_prepared(prepared) == prepared
+
+
+def test_reprepare_restores_missing_sidecar_and_preserves_existing_scientific_evidence(sweep):
+    from hyper_hyperqueue.integrations.rfd4.runtime import identity
+
+    planned = plan(sweep)
+    destination = sweep["root"] / "prepared"
+    first = prepare.prepare_sweep(planned, destination)
+    row = sweep["manifest"]["rows"][0]
+    output = Path(row["output_dir"])
+    sidecars = output.parent / ".hhq-rfd4"
+    sidecar = sidecars / identity({"output_dir": str(output)})
+    owner = sidecar / "owner.json"
+    owner.write_text('{"fixture": "existing runtime evidence"}\n')
+    output.mkdir()
+    model = output / "model.cif"
+    model.write_text("data_existing\n")
+    other = next(path for path in sidecars.iterdir() if path != sidecar)
+    other.rmdir()
+
+    assert prepare.prepare_sweep(planned, destination) == first
+    assert other.is_dir()
+    assert owner.read_text() == '{"fixture": "existing runtime evidence"}\n'
+    assert model.read_text() == "data_existing\n"
+
+
+def test_sidecar_directory_conflict_prevents_package_publication(sweep):
+    planned = plan(sweep)
+    science = sweep["root"] / "science"
+    science.mkdir()
+    conflict = science / ".hhq-rfd4"
+    conflict.write_text("preserve real file\n")
+    destination = sweep["root"] / "prepared"
+    with pytest.raises((FileExistsError, NotADirectoryError)):
+        prepare.prepare_sweep(planned, destination)
+    assert not (destination / "prepared.json").exists()
+    assert not (destination / "bundles").exists()
+    assert conflict.read_text() == "preserve real file\n"
+
+
+def test_sidecar_precreation_uses_runtime_unicode_path_identity(tmp_path):
+    from hyper_hyperqueue.integrations.rfd4.runtime import identity
+
+    output = tmp_path / "protéina" / "design"
+    prepare._prepare_output_sidecars([{"rows": [{"output_dir": str(output)}]}])
+    expected = output.parent / ".hhq-rfd4" / identity({"output_dir": str(output.resolve())})
+    assert expected.is_dir()
+    assert not output.exists()
+
+
 def test_native_source_and_input_drift_fail_before_any_writes(sweep):
     planned = plan(sweep)
     Path(sweep["manifest"]["rows"][0]["input"]).write_text("changed\n")
@@ -260,6 +334,7 @@ def test_native_source_and_input_drift_fail_before_any_writes(sweep):
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         prepare.prepare_sweep(planned, sweep["root"] / "never_created")
     assert not (sweep["root"] / "never_created").exists()
+    assert not (sweep["root"] / "science").exists()
 
 
 @pytest.mark.parametrize(

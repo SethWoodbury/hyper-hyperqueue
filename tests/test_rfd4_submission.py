@@ -537,6 +537,7 @@ def test_real_preparation_import_contract_and_tamper_gate(tmp_path, config):
             "rows": [
                 {
                     "run_id": method,
+                    "output_dir": str(tmp_path / "science" / method),
                     "config": str(source),
                     "config_sha256": pins[str(source)],
                     "input": str(ligand),
