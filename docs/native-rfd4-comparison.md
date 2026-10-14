@@ -33,6 +33,21 @@ of the effect of one campaign.
 | Source isolation | Optional copied code checkout | Source hash pins fail if modified; a separate frozen checkout avoids interrupting active work |
 | Resume provenance | Native output checks | Immutable task identity, ownership and artifact checks; stronger checks can require more recomputation |
 
+Ordinary native inference commands and configurations can also be submitted
+through generic HHQ. An unqualified feature in the specialized warm adapter is
+not removal of that native capability. Do not put native **Slurm-submitting**
+launch scripts inside pooled tasks: HHQ should own the allocation, and the task
+should execute the inference command inside it.
+
+An actual repaired warm control completed six gradient roots and four beam
+roots across different inputs, with real AF3 outputs and complete saved motif
+mapping. A separate stock-inference control also completed. The first warm beam
+row took about 517 seconds versus about 530 seconds for the standalone native
+control process; this is not evidence of a general speedup. Their generated
+sequences differed despite equal declared seeds, and these are only small
+controls. Repeated beam proposals can share sequences: report unique sequences
+separately from structure and AF3 file counts.
+
 ## Qualification criteria
 
 1. Check input/config/seed/output mapping across cold and warm rows, including

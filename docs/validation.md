@@ -1,5 +1,28 @@
 # Validation record — 2026-10-12
 
+## October 14 — application startup and scientific controls
+
+The merged application-startup probe passed the full **587-test suite in 45.02
+seconds** and Ruff. An actual local HQ test showed a failed probe registering
+zero workers and consuming zero task attempts; a healthy replacement then ran
+the waiting command exactly once. The new probe has not yet been exercised in
+a Slurm allocation. It is optional, bounded and runs before HQ registration.
+
+Repaired scientific controls completed six gradient roots and four warm beam
+roots across Glu/Asp inputs, plus a separate two-root stock-inference beam
+control. Saved proposal mappings and rewards were checked, and actual AF3
+predictions were produced. The warm beam control saved 32 proposals (16 unique
+protein sequences) and 14 AF3 files (six unique sequences). This qualifies the
+tested runtime path, not design quality or every search recipe.
+
+Measured whole-job memory peaks were 17.24 GiB for gradient and 16.00 GiB for
+warm beam; the stock-inference control reached 16.12 GiB. Summed process RSS
+double-counts shared pages and was higher than cgroup memory on the beam run.
+Use measured cgroup memory for allocation sizing and report assigned-GPU VRAM
+separately. The forthcoming comparison uses 20/19 GiB task RAM respectively,
+plus worker overhead. Large bundles may still exceed these small-control peaks;
+bounded OOM recovery remains enabled.
+
 ## October 14 — planned renewal and rapid multi-partition refill
 
 The combined suite passed **466 tests, zero skipped, in 109.05 seconds** on shared
