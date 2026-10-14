@@ -303,7 +303,25 @@ def reconcile_hq(store, hq):
                 current = store.task_state(intent["campaign_id"], tid)
                 if current.get("submission_token") not in (None, intent["token"]):
                     continue
-                if current.get("state") not in ("succeeded", "failed", "canceled", "interrupted"):
+                if current.get("state") == "retry_wait" and current.get("retry_authorized") is True:
+                    latest = current.get("latest_attempt", {})
+                    env = latest.get("context", {}).get("environment", {})
+                    if (current.get("after_attempt_id") == latest.get("attempt_id")
+                            and latest.get("attempt_id") is not None
+                            and str(env.get("HQ_JOB_ID")) == str(intent["hq_job_id"])
+                            and str(env.get("HQ_TASK_ID")) == str(task_index)):
+                        # This terminal HQ occurrence predates the explicit retry.
+                        # Retire only it, retaining the evidence; siblings stay live.
+                        intent["retired_task_ids"] = sorted(set(intent.get("retired_task_ids", [])) | {tid})
+                        intent.setdefault("retired_task_evidence", {})[tid] = {
+                            "attempt_id": latest["attempt_id"], "hq_terminal_evidence": item,
+                            "reason": "authorized_retry_after_terminal_occurrence",
+                        }
+                        store.put_intent(intent)
+                    # Missing/mismatched ownership stays reserved for inspection,
+                    # never overwrites a valid retry decision with the old failure.
+                    continue
+                if current.get("state") not in ("succeeded", "failed", "canceled", "interrupted", "blocked"):
                     canceled = str(status).lower() in ("canceled", "cancelled")
                     change = {
                         "state": "canceled" if canceled else "interrupted",
