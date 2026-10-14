@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import math
+import re
 import shlex
 import sys
 import time
@@ -453,6 +454,44 @@ def direct_admission_gate(store, config, campaign_id):
     return None
 
 
+def worker_exclusions(config: Config, controls: dict) -> tuple[Config, dict]:
+    """Add explicit node quarantine to future workers; never edit frozen config/tasks."""
+    if not isinstance(controls, dict):
+        raise TypeError("controls must be a JSON object")
+
+    def nodes(value):
+        if not isinstance(value, list) or any(
+            not isinstance(node, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,252}", node)
+            for node in value
+        ):
+            raise ValueError("excluded_nodes must be a list of literal node names (no Slurm expressions/options)")
+        return set(value)
+
+    shared = nodes(controls.get("excluded_nodes", []))
+    scoped = controls.get("excluded_nodes_by_profile", {})
+    if not isinstance(scoped, dict) or set(scoped) - config.profiles.keys():
+        raise ValueError("excluded_nodes_by_profile must name existing profiles")
+    additions = {name: shared | nodes(scoped.get(name, [])) for name in config.profiles}
+    # A fallback uses the same physical allocation, so its placement must stay identical.
+    changed = True
+    while changed:
+        changed = False
+        for name, profile in config.profiles.items():
+            for fallback in profile.fallback_profiles:
+                union = additions[name] | additions[fallback]
+                if union != additions[name] or union != additions[fallback]:
+                    additions[name] = additions[fallback] = union
+                    changed = True
+    active = {name: sorted(value) for name, value in additions.items() if value}
+    if not active:
+        return config, {}
+    derived = config.model_copy(deep=True)
+    for name, value in active.items():
+        # Existing user-provided Slurm expressions remain byte-for-byte intact.
+        derived.profiles[name].exclude = list(dict.fromkeys([*config.profiles[name].exclude, *value]))
+    return derived, active
+
+
 def tick(config: Config, *, epoch=None, slurm=None, hq=None):
     from .backends.slurm import SlurmClient
 
@@ -460,6 +499,9 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
     slurm = slurm or SlurmClient()
     with store.lock():
         assert_epoch(store, epoch)
+        controls_path = store.root / "controls.json"
+        controls = json.loads(controls_path.read_text()) if controls_path.exists() else {}
+        worker_config, active_exclusions = worker_exclusions(config, controls)
         jobs = slurm.query_jobs()
         reconcile_slurm(store, slurm, jobs)
         campaigns = store.campaigns()
@@ -538,10 +580,8 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
         from .adaptive_recovery import effective_config
 
         base_profile_memory = {name: profile.memory_mib for name, profile in config.profiles.items()}
-        config = effective_config(store, config, ready)
+        config = effective_config(store, worker_config, ready)
         owned = [i for i in store.intents() if i.get("backend") == "worker"]
-        controls_path = store.root / "controls.json"
-        controls = json.loads(controls_path.read_text()) if controls_path.exists() else {}
         gated, gate_reasons = allocation_gates(
             store, config, owned, reset_after=controls.get("startup_reset_after")
         )
@@ -560,6 +600,7 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
             ],
             remaining_control_seconds=None if deadline is None else max(0, deadline - time.time()),
         )
+        plan["worker_node_exclusions"] = active_exclusions
         plan["reasons"].extend(gate_reasons + direct_gate_reasons)
         if hq_admission_blocked:
             plan["actions"] = []

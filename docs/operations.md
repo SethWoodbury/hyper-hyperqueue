@@ -198,3 +198,26 @@ Old notebook command generation can stay unchanged:
 | `force_redo` | New explicit import generation and safe output policy |
 
 The original aKG scheduler is untouched. Migrating it is separate work: start with a small new commands batch, inspect its manifest and output validator, then increase explicit budgets. Old completion markers are not trusted or imported automatically.
+
+### Add live worker node exclusions
+
+An operator can add literal node names to `STATE/controls.json` without changing
+immutable campaign tasks or base configuration. Preserve the other control keys
+and write the file atomically under `StateStore.lock()`:
+
+```json
+{
+  "excluded_nodes": ["bad-node-1"],
+  "excluded_nodes_by_profile": {"gpu-large": ["bad-node-2"]}
+}
+```
+
+The controller reads this on each tick and applies the union to **future pooled
+worker allocations**. Existing profile exclusions, including Slurm node-range
+expressions, remain intact. A profile-specific addition propagates to its
+same-allocation fallback profiles, and vice versa. New exclusions accept literal
+hostnames only; unknown profiles or invalid values block admission explicitly.
+`controller_status.json` reports the applied lists at
+`plan.worker_node_exclusions` and each new allocation snapshots its exclusions.
+This does not edit already queued or running jobs, change direct arrays, or reset
+startup-failure circuits. Reset a circuit only after fixing or excluding its cause.
