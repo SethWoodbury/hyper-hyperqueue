@@ -22,6 +22,15 @@ model constraint. Inventory alone did not reveal this rule. On the same date,
 `gpu-train` (twelve hours); these checks allocated no GPUs. A successful planning
 check is not model/kernel compatibility qualification on every physical GPU.
 
+For the inspected RFD4 image specifically, a real Titan RTX (SM75) passed BF16
+matrix multiplication and TransformerEngine linear operations but failed the
+native pair-biased attention path with its configured backends (`Invalid backend`).
+The application comparison therefore adds `Ampere|Lovelace|Hopper|Blackwell` to
+both backends' routes, covering the site's currently observed newer generations.
+This is an application compatibility constraint, not a generic HHQ restriction.
+Titan nodes can belong to regular `gpu` as well as backfill; selecting `small`
+alone does not guarantee this workload's hardware compatibility.
+
 The application's two-running/one-pending training setting is intentionally lower
 than the site limit. A running target is not a Slurm hard throttle: pending jobs
 can start between reconciliations. Shared outstanding caps include other jobs by

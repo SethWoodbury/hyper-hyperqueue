@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
+from pathlib import Path
 
 import psutil
 
@@ -56,12 +58,98 @@ def allocation_context() -> dict:
         "hostname": __import__("socket").gethostname(),
         "cpu_affinity": affinity,
         "environment": {name: os.environ[name] for name in names if name in os.environ},
-        "gpu_telemetry": "not sampled; GPU visibility is inherited unchanged",
+        "gpu_telemetry": "assigned-UUID VRAM sampling, when available, is recorded in execution telemetry",
     }
 
 
+def job_cgroup(environment, *, proc_root=Path("/proc"), cgroup_root=Path("/sys/fs/cgroup")):
+    """Locate only this Slurm job's v2 cgroup; never report a whole-node group."""
+    job_id = environment.get("SLURM_JOB_ID", "")
+    if not str(job_id).isdigit():
+        return None
+    try:
+        lines = (proc_root / "self/cgroup").read_text().splitlines()
+        relative = next(line[3:] for line in lines if line.startswith("0::"))
+        parts = Path(relative).parts
+        if ".." in parts:
+            return None
+        index = parts.index(f"job_{job_id}")
+        candidate = cgroup_root.joinpath(*[p for p in parts[:index + 1] if p != "/"])
+        if not candidate.resolve().is_relative_to(cgroup_root.resolve()):
+            return None
+        return candidate if (candidate / "memory.current").is_file() else None
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+class AllocationSampler:
+    """Best-effort allocation measurements; no scheduler calls or CUDA contexts."""
+    def __init__(self, devices=(), *, environment=None, query=subprocess.run,
+                 proc_root=Path("/proc"), cgroup_root=Path("/sys/fs/cgroup")):
+        self.cgroup = job_cgroup(os.environ if environment is None else environment,
+                                 proc_root=proc_root, cgroup_root=cgroup_root)
+        self.cgroup_current_peak = None
+        self.cgroup_lifetime_peak = None
+        self.cgroup_start_peak = None
+        self.uuids = [d["uuid"] for d in devices]
+        if any(not re.fullmatch(r"GPU-[0-9a-fA-F-]{36}", value) for value in self.uuids):
+            self.uuids = []
+        self.query = query
+        self.gpu_peak_mib = {}
+        self.gpu_samples = 0
+        self.gpu_error = None
+        self.next_gpu_sample = 0.0
+
+    def sample(self):
+        if self.cgroup is not None:
+            for filename, attribute in (("memory.current", "cgroup_current_peak"),
+                                        ("memory.peak", "cgroup_lifetime_peak")):
+                try:
+                    value = int((self.cgroup / filename).read_text().strip())
+                    if value < 0:
+                        continue
+                    if filename == "memory.peak" and self.cgroup_start_peak is None:
+                        self.cgroup_start_peak = value
+                    setattr(self, attribute, max(getattr(self, attribute) or 0, value))
+                except (OSError, ValueError):
+                    pass  # Unsupported/inaccessible telemetry never changes task status.
+        now = time.monotonic()
+        if not self.uuids or self.gpu_error is not None or now < self.next_gpu_sample:
+            return
+        self.next_gpu_sample = now + 10.0
+        try:
+            result = self.query(["nvidia-smi", f"--id={','.join(self.uuids)}",
+                                 "--query-gpu=uuid,memory.used", "--format=csv,noheader,nounits"],
+                                capture_output=True, text=True, timeout=1, check=False)
+            if result.returncode:
+                raise ValueError(f"nvidia-smi exited {result.returncode}")
+            values = {}
+            for line in result.stdout.splitlines():
+                identity, memory = [v.strip() for v in line.split(",")]
+                values[identity] = int(memory)
+            if set(values) != set(self.uuids) or any(v < 0 for v in values.values()):
+                raise ValueError("VRAM response did not match assigned GPU UUIDs")
+            for identity, memory in values.items():
+                self.gpu_peak_mib[identity] = max(self.gpu_peak_mib.get(identity, 0), memory)
+            self.gpu_samples += 1
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            self.gpu_error = str(exc)[:300]  # Disable a failing query, rather than repeated overhead.
+
+    def summary(self):
+        return {
+            "cgroup_path": str(self.cgroup) if self.cgroup else None,
+            "sampled_job_memory_current_peak_bytes": self.cgroup_current_peak,
+            "job_memory_lifetime_peak_bytes": self.cgroup_lifetime_peak,
+            "job_memory_lifetime_peak_at_start_bytes": self.cgroup_start_peak,
+            "assigned_gpu_sampled_peak_mib": self.gpu_peak_mib,
+            "gpu_samples": self.gpu_samples, "gpu_interval_seconds": 10,
+            "gpu_query_error": self.gpu_error,
+            "scope": "Job cgroup includes all job processes/cache and concurrent tasks; memory.peak includes earlier tasks. GPU VRAM is device usage, sampled only on assigned UUIDs; brief peaks may be missed. Missing values are unknown, not zero.",
+        }
+
+
 class ProcessSampler:
-    def __init__(self, pid: int, interval_seconds: float = 0.2):
+    def __init__(self, pid: int, interval_seconds: float = 0.2, *, devices=(), environment=None):
         self.pid = pid
         self.interval_seconds = interval_seconds
         self.samples = 0
@@ -69,8 +157,10 @@ class ProcessSampler:
         self.cpu_seconds: float | None = None
         self._cpu_by_identity: dict[tuple[int, float], float] = {}
         self.started = time.monotonic()
+        self.allocation = AllocationSampler(devices, environment=environment)
 
     def sample(self) -> None:
+        self.allocation.sample()
         try:
             parent = psutil.Process(self.pid)
             processes = [parent, *parent.children(recursive=True)]
@@ -99,5 +189,6 @@ class ProcessSampler:
             "sample_interval_seconds": self.interval_seconds,
             "sampled_peak_rss_bytes": self.peak_rss_bytes,
             "sampled_cpu_seconds": self.cpu_seconds,
-            "limitations": "Sampled process-tree RSS sums shared pages and can miss short-lived children/peaks; detached processes and GPU VRAM are not measured. Not Slurm cgroup peak memory.",
+            "allocation": self.allocation.summary(),
+            "limitations": "Sampled process-tree RSS sums shared pages and can miss short-lived children/peaks and detached processes. Separate allocation telemetry has wider scope; do not equate RSS with cgroup memory or GPU VRAM.",
         }

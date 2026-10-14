@@ -164,6 +164,10 @@ large-workspace qualification.
 
 Runtime metadata is outside the checkout; scratch holds disposable test environments and bulk output. No remote Git repository was created or pushed.
 
+The preceding publication statement describes the original October 12 validation.
+On October 14 the owner authorized public publication; the repository was published
+at https://github.com/SethWoodbury/hyper-hyperqueue after the checks recorded below.
+
 
 ## October 14 — finite-batch cleanup and remaining-only recovery
 
@@ -250,3 +254,31 @@ late-NFS result reconciliation, bounded OOM recovery, strict pending dependency
 controls, same-placement worker fallback, and the RFD4 interrupted-row contract.
 This count is unit/local-integration evidence, not a throughput or GPU-quality
 claim. Real Slurm CPU evidence is recorded separately above.
+
+## October 14 — actual pending-only cancellation
+
+A held CPU job, **29199098**, exercised the actual `cleanup_workers()` path and
+Slurm `scancel --ctld --state=PENDING`. A deliberately wrong ownership token was
+refused first; the correctly owned pending job was then canceled. Accounting
+confirmed `CANCELLED`, zero elapsed allocation time, and no node assigned.
+This qualifies the real pending cancellation RPC and ownership check. It does not
+replace mocked pending-to-running race tests or demonstrate a whole live HQ
+backlog draining to pending cancellation.
+
+The small probe initially requested less than this site's 15-minute minimum and
+was rejected without a job ID. Its cancellation then succeeded, but the probe's
+final accounting call omitted the required bounded start time; that fixture was
+corrected and terminal accounting verified separately. All evidence is preserved
+under AChE V3 `slurm/scheduler_comparison_30/qualification/pending_drain_real/`.
+
+## October 14 — allocation telemetry qualification
+
+The subsequent source passed **566 tests in 39.89 seconds**, with Ruff clean and
+independent review. Added telemetry locates the exact Slurm job's cgroup-v2
+ancestor and reports sampled `memory.current` separately from lifetime
+`memory.peak` (which includes earlier tasks). It queries VRAM only for verified
+assigned GPU UUIDs, at most once per ten seconds with a one-second query timeout.
+CPU tasks make no GPU query. Missing/unsupported measurements remain unknown and
+cannot fail a scientific command. Device usage is not process-specific memory,
+and brief VRAM peaks can be missed. These source tests precede live RFD4
+qualification of the new measurements.

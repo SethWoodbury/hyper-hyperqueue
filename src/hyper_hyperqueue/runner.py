@@ -49,6 +49,7 @@ def _execute(
     stderr,
     timeout: float | None,
     grace: float = 2.0,
+    devices=(),
 ) -> dict:
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("Task runner must execute in the main thread to forward signals safely")
@@ -74,7 +75,7 @@ def _execute(
         )
         for signum in received:
             _signal_group(process, signum)
-        sampler = ProcessSampler(process.pid)
+        sampler = ProcessSampler(process.pid, devices=devices, environment=env)
         next_sample = started
         while True:
             now = time.monotonic()
@@ -572,6 +573,7 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                             stdout=out,
                             stderr=err,
                             timeout=task.resources.timeout_seconds,
+                            devices=result["assigned_gpu"]["devices"],
                         )
                         os.fsync(out.fileno())
                         os.fsync(err.fileno())
