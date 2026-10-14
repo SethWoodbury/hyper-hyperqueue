@@ -43,6 +43,38 @@ def assert_service_config_compatible(config: Config) -> None:
         )
 
 
+def reopen_completed_service(config, *, slurm=None):
+    """Allow a new import only after automatic shutdown is positively finished.
+
+    No service is started before import. This is scoped to our automatic closure;
+    explicit operator stop/drain semantics are unchanged.
+    """
+    from .service.leadership import read_record
+    from .service.supervisor import _terminal_generation_proof
+
+    store = StateStore(config.state_dir)
+    directory = store.root / "service"
+    with store.lock():
+        completion = read_record(directory / "completion.json", {})
+        deployment = read_record(directory / "deployment.json", {})
+        if (not completion or completion.get("deployment_id") != deployment.get("deployment_id")
+                or deployment.get("desired_state") != "STOPPED"):
+            return False
+        previous = read_record(directory / "leader.json", {})
+        if not previous or previous.get("epoch") != completion.get("epoch"):
+            raise ValueError("Auto-completed service ownership is unresolved; new import blocked")
+        try:
+            _terminal_generation_proof(config, previous, client=slurm)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                "Automatic completion cleanup is not yet positively terminal; no new work was imported. "
+                "Wait for owned allocations/accounting, then repeat submit or append."
+            ) from exc
+        completion.update(phase="stopped")
+        atomic_json(directory / "completion.json", completion)
+        return True
+
+
 def default_resources(config, names):
     gpu = any(config.profiles[n].gres for n in names)
     return Resources(gpus=int(gpu), memory_mib=12288 if gpu else 1024)
@@ -131,6 +163,7 @@ def submit(
     )
     if decision.mode == "pooled":
         assert_service_config_compatible(config)
+        reopen_completed_service(config, slurm=slurm)
     store = StateStore(config.state_dir)
     metadata = ingest_file(
         store,
@@ -195,6 +228,7 @@ def append(campaign_id: str, path: str | Path, config: Config, *, import_key=Non
         raise ValueError("Campaign imports are paused")
     if campaign["mode"] == "pooled":
         assert_service_config_compatible(config)
+        restart_completed = reopen_completed_service(config, slurm=slurm)
     exemplar = store.task(campaign_id, campaign["task_ids"][0])
     import_settings = campaign["imports"][0]["settings"]
     metadata = ingest_file(
@@ -232,6 +266,11 @@ def append(campaign_id: str, path: str | Path, config: Config, *, import_key=Non
                 max_parallel=campaign.get("max_parallel"),
                 commands_per_job=campaign.get("commands_per_job", 1),
             )
+    elif restart_completed:
+        from .service.supervisor import start_service
+
+        result = start_service(config, hosting=config.control.hosting,
+                               standby=config.control.standby_replicas, slurm=slurm)
     return Submission(
         campaign_id=campaign_id,
         state_path=str(store.campaign_dir(campaign_id)),

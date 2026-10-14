@@ -10,6 +10,11 @@ from .models import OutputPolicy, Resources, RetryPolicy, TaskSpec
 from .state import StateStore, atomic_bytes, fingerprint, identifier, immutable_json, utc_now
 
 
+def import_campaign_id(import_key: str) -> str:
+    """Stable initial-import identity shared by callers and ingestion."""
+    return "c_" + hashlib.sha256(import_key.encode()).hexdigest()[:24]
+
+
 def parse_bytes(data: bytes, *, literal: bool = False, format: str = "lines") -> list[dict]:
     text = data.decode("utf-8")
     records = []
@@ -103,7 +108,7 @@ def ingest_file(
     digest = hashlib.sha256(data).hexdigest()
     key = import_key or fingerprint({"sha256": digest, "settings": settings})
     # For initial API retries a stable explicit import key also identifies the campaign.
-    campaign_id = identifier(campaign_id or ("c_" + hashlib.sha256(key.encode()).hexdigest()[:24]))
+    campaign_id = identifier(campaign_id or import_campaign_id(key))
     import_id = "i_" + hashlib.sha256((campaign_id + "\0" + key).encode()).hexdigest()[:24]
     with store.lock():
         campaign_path = store.campaign_dir(campaign_id) / "campaign.json"
@@ -116,6 +121,23 @@ def ingest_file(
                         "Import key already exists with different command bytes/settings; choose an explicit new append key"
                     )
                 return old
+        if mode == "pooled":
+            # The supervisor commits completion under this same mutation lock.
+            # Do not accept new work behind that barrier while its CPU allocation
+            # is still closing. API submission reopens after exact terminal proof.
+            service = store.root / "service"
+            completion_path = service / "completion.json"
+            deployment_path = service / "deployment.json"
+            if completion_path.exists() and deployment_path.exists():
+                completion = json.loads(completion_path.read_text())
+                deployment = json.loads(deployment_path.read_text())
+                if (completion.get("deployment_id") == deployment.get("deployment_id")
+                        and deployment.get("desired_state") == "STOPPED"
+                        and completion.get("phase") != "stopped"):
+                    raise ValueError(
+                        "Service completion cleanup is still in progress; no new work was imported. "
+                        "Wait for its owned allocations to terminate, then repeat submit or append."
+                    )
         if old and old["mode"] != mode:
             raise ValueError("Cannot change the backend of an existing campaign")
         tasks = []

@@ -1,6 +1,7 @@
 .venv/
 .local/
 __pycache__/
+__marimo__/
 *.pyc
 .pytest_cache/
 .ruff_cache/

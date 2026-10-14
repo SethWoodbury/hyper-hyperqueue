@@ -90,6 +90,33 @@ def test_hq_retry_retires_only_failed_occurrence_and_honors_cap(tmp_path):
     assert controller.retry_ready_failures(store, Config(), [value]) == []
 
 
+def test_paused_unadmitted_rows_do_not_request_idle_workers(tmp_path, monkeypatch):
+    from hyper_hyperqueue.service.leadership import LeadershipGuard
+
+    store, value = campaign(tmp_path, commands="true\ntrue")
+    value["pause_dispatch"] = True
+    store.save_campaign(value)
+    # A task already admitted to HQ still needs compatible worker capacity.
+    store.update_task_state(value["campaign_id"], value["task_ids"][1], {"state": "submitted"})
+    observed = []
+
+    def capacity(config, ready, *args, **kwargs):
+        observed.extend(ready)
+        return {"actions": [], "reasons": []}
+
+    monkeypatch.setattr(controller, "capacity_plan", capacity)
+    monkeypatch.setattr(controller, "reconcile_hq", lambda *args: None)
+    monkeypatch.setattr(controller, "retry_ready_failures", lambda *args: [])
+    guard = LeadershipGuard(store.root / "service").acquire()
+    guard.heartbeat("ACTIVE")
+    monkeypatch.setenv("HHQ_LEADER_FD", str(guard.fd))
+    try:
+        controller.tick(Config(state_dir=str(store.root)), epoch=guard.epoch, slurm=Slurm(), hq=object())
+    finally:
+        guard.close(children_quiescent=True)
+    assert [row["task_id"] for row in observed] == [value["task_ids"][1]]
+
+
 def test_actual_hq_task_mapping_canceled_never_becomes_worker_loss(tmp_path):
     store, value = campaign(tmp_path, commands="true")
     tid = value["task_ids"][0]
@@ -114,6 +141,36 @@ def test_actual_hq_task_mapping_canceled_never_becomes_worker_loss(tmp_path):
     controller.reconcile_hq(store, HQ())
     assert store.task_state(cid, tid)["state"] == "canceled"
     assert store.task_state(cid, tid)["reason"] == "user_cancelled"
+
+
+def test_unknown_hq_admission_does_not_report_suppressed_pending_submissions(tmp_path, monkeypatch):
+    from hyper_hyperqueue.service.leadership import LeadershipGuard
+
+    store, _ = campaign(tmp_path, commands="true")
+    monkeypatch.setattr(controller, "admit_hq", lambda *args: False)
+    monkeypatch.setattr(controller, "reconcile_hq", lambda *args: None)
+    monkeypatch.setattr(controller, "retry_ready_failures", lambda *args: [])
+    monkeypatch.setattr(controller, "capacity_plan", lambda *args, **kwargs: {
+        "actions": [{"profile": "gpu", "reason": "MIN_PENDING_RESERVE"}], "reasons": [],
+        "pending_reserves": {"gpu": {
+            "target": 20, "observed_pending": 18, "uncertain_reservations": 1,
+            "planned": 1, "reserved_after_plan": 20, "deficit_after_plan": 0, "blocked_by": [],
+        }},
+    })
+    guard = LeadershipGuard(store.root / "service").acquire()
+    guard.heartbeat("ACTIVE")
+    monkeypatch.setenv("HHQ_LEADER_FD", str(guard.fd))
+    try:
+        result = controller.tick(Config(state_dir=str(store.root)), epoch=guard.epoch,
+                                 slurm=Slurm(), hq=object())
+    finally:
+        guard.close(children_quiescent=True)
+    assert result["plan"]["actions"] == []
+    reserve = result["plan"]["pending_reserves"]["gpu"]
+    assert reserve["planned"] == 0
+    assert reserve["reserved_after_plan"] == 19
+    assert reserve["deficit_after_plan"] == 1
+    assert reserve["blocked_by"] == ["HQ_SUBMISSION_UNKNOWN"]
 
 
 def test_unknown_attempt_needs_exact_terminal_owned_allocation(tmp_path, monkeypatch):

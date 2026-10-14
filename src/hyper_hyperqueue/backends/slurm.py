@@ -700,3 +700,29 @@ class SlurmClient:
             ):
                 raise SlurmError(f"Refusing cancellation: ownership not proven for {jid}")
         return self._checked(["scancel", *ids])
+
+    def cancel_pending(self, job_ids, expected_token: str) -> CommandResult:
+        """Cancel only owned jobs still pending when Slurm processes the request.
+
+        ``--ctld`` is essential: without it scancel may apply state filters in
+        the client and send unconditional per-job cancellations afterward. A
+        successful response is not terminal evidence; callers must reconcile.
+        """
+        if not TOKEN_RE.fullmatch(expected_token):
+            raise ValueError("Invalid submission token")
+        ids = self._ids(job_ids)
+        if not ids:
+            raise ValueError("Cancellation needs explicit job IDs")
+        live = self.query_jobs(expand_arrays=True)
+        pending = []
+        for jid in ids:
+            matching = _filter_jobs(live, [jid])
+            if not matching or any(
+                j.user != self.user or j.comment != f"hhq:{expected_token}" for j in matching
+            ):
+                raise SlurmError(f"Refusing cancellation: ownership not proven for {jid}")
+            if any(j.state == "PENDING" for j in matching):
+                pending.append(jid)
+        if not pending:
+            return CommandResult([], 0, "No owned jobs currently pending; no cancellation requested.")
+        return self._checked(["scancel", "--ctld", "--state=PENDING", f"--user={self.user}", *pending])

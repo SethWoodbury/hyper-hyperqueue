@@ -258,8 +258,17 @@ class StateStore:
             latest = attempts[-1]
             if "result" in latest:
                 result = latest["result"]
-                # Explicit coordinator decisions after this attempt take precedence.
-                if state.get("after_attempt_id") == latest["attempt_id"]:
+                # HQ can observe process exit before NFS exposes result.json.
+                # Its provisional worker-lost observation must yield to the
+                # later exact result; explicit cancellation/retry decisions do not.
+                late_result = (
+                    state.get("state", state.get("status")) == "interrupted"
+                    and state.get("reason") == "worker_lost"
+                    and bool(state.get("hq_terminal_evidence"))
+                    and result.get("attempt_id") == latest["attempt_id"]
+                    and result.get("task_fingerprint") == latest.get("task_fingerprint")
+                )
+                if state.get("after_attempt_id") == latest["attempt_id"] and not late_result:
                     return {**state, "latest_attempt": latest}
                 return {
                     **state,

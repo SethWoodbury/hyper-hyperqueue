@@ -98,18 +98,3 @@ def local_quiescence(previous: dict, *, host: str, children: list[dict]) -> Reco
             "verified_at": time.time(),
         },
     )
-
-
-def replay_decision(task, latest_attempt: dict | None, proof: dict | None) -> str:
-    result = (latest_attempt or {}).get("result") or {}
-    if result.get("status") == "succeeded":
-        return "reconcile_completion"
-    if result.get("reason") == "canceled" or result.get("status") == "canceled":
-        return "keep_canceled"
-    if not proof or proof.get("quiescent") is not True:
-        return "blocked_unproven_quiescence"
-    if not task.output.repeatable or task.output.mode == "manual_on_ambiguity":
-        return "manual_on_ambiguity"
-    if latest_attempt and latest_attempt.get("attempt_number", 1) >= task.retry.max_attempts:
-        return "retry_exhausted"
-    return "eligible_for_bounded_retry"

@@ -32,6 +32,11 @@ Output modes:
 - `manual_on_ambiguity` is the default: unresolved side effects block replay.
 - `in_place` preserves declared paths. Automatic interrupted replay requires repeatability, retry bounds and exact fencing evidence.
 - `isolated` supplies a fresh per-attempt output directory. The command must actually use `HHQ_TASK_OUTPUT_DIR`; hhq cannot rewrite arbitrary shell paths. Validated completion points to the accepted attempt. Generic atomic publication of application directory trees is not implemented.
+  Relative `expected_paths` are resolved against the command working directory.
+  For isolated output, use `expected_paths=["{attempt_dir}/output/result.json"]`
+  and have the command write through `HHQ_TASK_OUTPUT_DIR`. Validate one command
+  through the runner before submitting a large batch.
+
 
 The API accepts expected output files, minimum bytes, a validator argv and a collision key. Completion requires exit zero plus every configured validator. Exit-code-only success is recorded explicitly. A collision key protects cooperating hhq tasks, not arbitrary external writers. Do not claim exactly-once external side effects.
 
@@ -50,7 +55,63 @@ For local hosting, use a separate selected configuration with `control.hosting: 
 
 Direct-only submission does not start a service. A CPU control job never silently switches to `cpu-bf`. A notebook is a client; closing it does not own the lifecycle of submitted jobs. Local hosting is only suitable where the declared endpoint is reachable by workers; no automatic SSH tunnels or public binding are created.
 
-An idle running service continues to consume its modest control allocation until stopped or its walltime ends. Workers exit after the configured idle timeout. Long campaigns need qualified standby/rollover or an explicit recovery/restart plan; a single control job does not provide unattended indefinite service.
+Set `control.stop_when_complete: true` for a finite command batch. After every registered
+command has validated success, cancellation or a final failure with retries settled,
+the controller cancels its own surplus **PENDING** workers. It confirms terminal
+Slurm evidence, waits for running workers to exit at the configured idle timeout,
+then stops the HQ server and CPU controller. A failed command remains failed.
+Paused/ready/running work, unknown submissions, missing completion evidence and
+unregistered HQ work prevent automatic shutdown. The shutdown decision is shared
+across every campaign in this state directory, not one method or one command file.
+
+The default is `false` to preserve existing saved configurations and services used
+for ongoing imports. The example and private future configuration enable it.
+Reconciliation defaults to 15 seconds; worker idle timeout remains 120 seconds and
+submission cooldown remains separate. Slurm pending cancellation is ownership-checked
+and uses server-side `--ctld --state=PENDING`, so a worker that starts during cleanup
+is allowed to exit normally. Scheduler errors retain uncertainty and delay shutdown.
+
+New preparations may change these controls; do not edit immutable active snapshots.
+For planned renewal of a Slurm-hosted CPU service, use:
+
+```yaml
+control:
+  hosting: slurm
+  walltime_seconds: 86400
+  standby_replicas: 0
+  auto_renew: true
+  renew_lead_seconds: 3600
+  stop_when_complete: true
+```
+
+An hour before expiry, the current service queues one waiting successor. That CPU
+job can start while the old service still owns HQ; it publishes readiness without
+starting a competing server. The old service then drains safely and leaves a
+verified handoff receipt. The successor restores the journal only after terminal
+ownership checks; queue/accounting delays can still leave a gap. Running
+worker/model processes restart across that boundary. `hhq service stop` prevents
+renewal, and completed work does not start another service. Unexpected failure or
+missing proof requires the recovery procedure; automatic renewal is not crash
+failover. Both renewal and completion stop are opt-in for old-config compatibility.
+
+To queue a large useful burst, set a budget's `fill_running_target: true`, its
+`running_target`, `min_pending`, and `max_submitted`, plus each profile's
+`max_workers`. For example, target 200, pending floor 8 and submitted cap 208,
+with `policy.max_submissions_per_cycle: 200` and
+`policy.submit_cooldown_seconds: 0`, can request up to 200 workers in one cycle
+when enough compatible tasks remain. Existing/external jobs and site limits may
+reduce that number. There is no 15-second sleep between those sequential `sbatch`
+calls. Larger application bundles mean fewer independent tasks, so they also
+reduce the useful concurrency ceiling.
+
+For the fastest use of several enabled partitions, opt in to
+`policy.speculative_partition_workers: true`. It permits pending worker capacity
+on different partitions for one shared HQ task pool, so jobs waiting on regular
+GPU do not prevent backfill from helping. It does not duplicate task executions.
+For example, 96 waiting tasks can justify up to 96 workers per enabled partition,
+subject to hard caps and the per-cycle burst. If all queues start together, surplus
+workers can be briefly idle before idle exit or completion cleanup. Keep this off
+when minimizing speculative allocations matters more than turnaround time.
 
 ## Controls have distinct scopes
 
@@ -96,6 +157,12 @@ ssh -N -L 8765:127.0.0.1:8765 USER@CLUSTER_HOST
 ```
 
 Open `http://127.0.0.1:8765`. The server accepts loopback hostnames, protects mutations with a session token and origin checks, and refuses public binding. Local users with account access are trusted; this is not a multi-user authenticated web application. Detailed logs and commands are private; support bundles use an allowlist and omit them.
+
+The viewer is read-only by default; add `--allow-submit` explicitly for the generic
+command form. Use `hhq ui --export /shared/private/overview.html` for a standalone
+snapshot. The [dashboard guide](dashboard.md) covers the charts, uncertainty,
+cached reads, and hosting the viewer in a small CPU allocation with the correct
+SSH tunnel to its compute node.
 
 ## Retention and migration
 

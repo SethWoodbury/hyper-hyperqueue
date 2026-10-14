@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from rich.table import Table
 
 from . import api
 from .config import load_config, profile_names
+from .integrations.rfd4.cli import app as rfd4_app
 from .models import OutputPolicy, Profile, Resources, RetryPolicy
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
@@ -23,6 +25,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(campaign_app, name="campaign")
 app.add_typer(pool_app, name="pool")
+app.add_typer(rfd4_app, name="rfd4")
 console = Console(stderr=True)
 settings = {}
 
@@ -222,17 +225,18 @@ def submit(
     name: str | None = None,
     cwd: Path | None = None,
     import_key: str | None = None,
-    repeatable: bool = False,
-    max_attempts: int = 1,
-    output_mode: str = "manual_on_ambiguity",
+    repeatable: bool | None = None,
+    max_attempts: int | None = None,
+    output_mode: str | None = None,
     no_service: bool = False,
     dry_run: bool = False,
-    nodes: int = 1,
-    ranks: int = 1,
+    nodes: int | None = None,
+    ranks: int | None = None,
     workload: str = "generic",
     priority: int = 0,
     input_fingerprint: str | None = None,
     software_fingerprint: str | None = None,
+    recovery_manifest: Path | None = None,
 ):
     """Import once; direct arrays continue after this CLI exits.
 
@@ -240,7 +244,48 @@ def submit(
     task requirements that must fit a configured worker. MPI needs an explicit
     launcher in each command; --nodes/--ranks only reserve the Slurm layout.
     """
-    c, p, r = options(profile, partition, cpus, mem, gpus, time, runtime, timeout, mode, nodes, ranks)
+    c, p, r = options(profile, partition, cpus, mem, gpus, time, runtime, timeout, mode,
+                      1 if nodes is None else nodes, 1 if ranks is None else ranks)
+    recovered = None
+    if recovery_manifest is not None:
+        from .recovery_export import load_export
+        from .state import fingerprint
+
+        recovered = load_export(recovery_manifest)
+        if Path(c.state_dir).expanduser().resolve() != Path(recovered["source_state_dir"]):
+            raise typer.BadParameter("Recovery imports must use the original state directory for duplicate protection")
+        if commands.resolve() != Path(recovered["commands_file"]):
+            raise typer.BadParameter("Commands path must match the recovery manifest")
+        if not recovered["count"]:
+            raise typer.BadParameter("There are no remaining commands to submit")
+        execution = recovered["execution_settings"]
+        for label, supplied, original in (
+            ("nodes", nodes, execution["resources"]["nodes"]),
+            ("ranks", ranks, execution["resources"]["ranks"]),
+            ("output-mode", output_mode, execution["output"]["mode"]),
+            ("repeatable", repeatable, execution["output"]["repeatable"]),
+        ):
+            if supplied is not None and supplied != original:
+                raise typer.BadParameter(f"Recovery preserves {label}={original}; changing it requires a separately reviewed plan")
+        if cwd is not None and cwd.resolve() != Path(execution["cwd"]):
+            raise typer.BadParameter("Recovery preserves the original working directory")
+        if input_fingerprint is not None or software_fingerprint is not None:
+            raise typer.BadParameter("Recovery preserves original input/software fingerprints")
+        key = "remaining:" + fingerprint({
+            "manifest": str(recovery_manifest.expanduser().resolve()),
+            "source_state_dir": recovered["source_state_dir"], "campaign_id": recovered["campaign_id"],
+        })
+        if import_key is not None and import_key != key:
+            raise typer.BadParameter("Recovery uses one stable import key; do not duplicate the exported generation")
+        import_key, format, literal = key, "jsonl", False
+        saved_resources = execution["resources"]
+        supplied = {"cpus": cpus, "memory_mib": mem, "gpus": gpus,
+                    "runtime_seconds": runtime, "timeout_seconds": timeout}
+        r = Resources.model_validate({
+            **saved_resources,
+            **{key: getattr(r, key) for key, value in supplied.items() if value is not None},
+            **({"runtime_confidence": "declared"} if runtime is not None else {}),
+        })
     if dry_run:
         output(
             api.plan(
@@ -268,17 +313,39 @@ def submit(
             literal=literal,
             format=format,
             name=name,
-            cwd=cwd,
+            cwd=recovered["execution_settings"]["cwd"] if recovered else cwd,
             import_key=import_key,
-            retry=RetryPolicy(max_attempts=max_attempts),
-            output=OutputPolicy(mode=output_mode, repeatable=repeatable),
+            retry=RetryPolicy.model_validate({
+                **recovered["execution_settings"]["retry"],
+                **({"max_attempts": max_attempts} if max_attempts is not None else {}),
+            }) if recovered else RetryPolicy(max_attempts=1 if max_attempts is None else max_attempts),
+            output=OutputPolicy.model_validate(recovered["execution_settings"]["output"])
+            if recovered else OutputPolicy(mode=output_mode or "manual_on_ambiguity", repeatable=bool(repeatable)),
+            environment=recovered["execution_settings"]["environment"] if recovered else None,
             start_service=not no_service,
-            workload=workload,
-            priority=priority,
-            input_fingerprint=input_fingerprint,
-            software_fingerprint=software_fingerprint,
+            workload=recovered["execution_settings"]["workload"] if recovered else workload,
+            priority=recovered["execution_settings"]["priority"] if recovered else priority,
+            input_fingerprint=recovered["execution_settings"]["input_fingerprint"] if recovered else input_fingerprint,
+            software_fingerprint=recovered["execution_settings"]["software_fingerprint"] if recovered else software_fingerprint,
+            shell=recovered["execution_settings"]["shell"] if recovered else "/bin/bash",
+            shell_options=recovered["execution_settings"]["shell_options"] if recovered else None,
         )
     )
+
+
+@app.command("export-remaining")
+def export_remaining(campaign_id: str, destination: Path):
+    """Retire quiescent unfinished occurrences and prepare exact commands; submit nothing."""
+    from .recovery_export import export_remaining as prepare
+
+    result = prepare(cfg(), campaign_id, destination)
+    output({
+        "manifest": str(destination.expanduser().resolve() / "manifest.json"),
+        "commands_file": result["commands_file"], "count": result["count"],
+        "excluded": result["excluded"], "submitted": False,
+        "source_occurrences": "blocked; ordinary resume cannot execute exported occurrences",
+        "next": "hhq submit COMMANDS --recovery-manifest MANIFEST --profile PROFILE --mem NEW_MEMORY --runtime SECONDS",
+    })
 
 
 @app.command()
@@ -310,7 +377,8 @@ def resume(campaign_id: str):
                 )
             )
     else:
-        output({"campaign_id": campaign_id, "state": "admission_resumed"})
+        output({"campaign_id": campaign_id, "state": "admission_resumed",
+                "next": "An active controller admits work on its next cycle. If stopped, explicitly run hhq service start."})
 
 
 @app.command()
@@ -344,6 +412,7 @@ def metrics(campaign_id: str | None = None, minimum_samples: int = 5):
 
 @app.command()
 def logs(task_id: str, attempt: str = "latest", stderr: bool = False, lines: int = 80):
+    from .logs import attempt_log_path
     from .state import StateStore
 
     store = StateStore(cfg().state_dir)
@@ -354,8 +423,7 @@ def logs(task_id: str, attempt: str = "latest", stderr: bool = False, lines: int
     item = items[-1] if attempt == "latest" else next((x for x in items if x["attempt_id"] == attempt), None)
     if item is None:
         raise typer.BadParameter("Unknown attempt")
-    directory = Path(item["attempt_dir"])
-    path = directory / ("stderr" if stderr else "stdout")
+    path = attempt_log_path(item, "stderr" if stderr else "stdout")
     if not path.exists():
         matches = list((store.campaign_dir(cid) / "attempts" / task_id).glob("*/attempt.json"))
         for m in matches:
@@ -392,7 +460,7 @@ def retry(campaign_id: str, failed: bool = typer.Option(False, "--failed")):
         {
             "authorized": accepted,
             "blocked": blocked,
-            "next": "hhq resume CAMPAIGN for direct; pooled controller admits on next cycle",
+            "next": "hhq resume CAMPAIGN for direct; pooled work needs an active controller. If stopped, explicitly run hhq service start.",
         }
     )
 
@@ -544,10 +612,21 @@ def pool_resume(profile: str, reset_startup_failures: bool = False):
 
 
 @app.command()
-def ui(host: str = "127.0.0.1", port: int = 8765):
-    from .ui import serve
+def ui(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    read_only: bool = typer.Option(True, "--read-only/--allow-submit"),
+    export: Annotated[
+        Path | None, typer.Option("--export", help="Save standalone HTML instead of hosting.")
+    ] = None,
+):
+    """View live progress locally, or export a private HTML snapshot."""
+    from .ui import export_dashboard, serve
 
-    serve(cfg(), host=host, port=port)
+    if export is not None:
+        typer.echo(str(export_dashboard(cfg(), export)))
+    else:
+        serve(cfg(), host=host, port=port, read_only=read_only)
 
 
 @app.command("support-bundle")
@@ -568,4 +647,7 @@ def entrypoint():
 
 
 if __name__ == "__main__":
+    # Nested commands import .cli.cfg; keep the -m invocation's parsed settings
+    # instead of importing a second module with an empty settings dictionary.
+    sys.modules["hyper_hyperqueue.cli"] = sys.modules[__name__]
     entrypoint()

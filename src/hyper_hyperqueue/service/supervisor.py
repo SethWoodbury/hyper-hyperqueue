@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from ..backends.hyperqueue import HQBackend, HQError, check_version, locate_binary
+from ..logs import log_directory
 from .leadership import (
     LeadershipError,
     LeadershipGuard,
@@ -80,7 +81,7 @@ def _config_snapshot(config, directory):
     return path
 
 
-def _submit_control(config, directory, deployment, role, client, *, exclude_host=None):
+def _submit_control(config, directory, deployment, role, client, *, exclude_host=None, renewal_from=None):
     """Persist exactly one control intent before its one external submit call."""
     token = uuid.uuid4().hex
     script = directory / f"control-{token}.sh"
@@ -105,9 +106,12 @@ def _submit_control(config, directory, deployment, role, client, *, exclude_host
         "status": "submitting",
         "created_at": time.time(),
     }
+    if renewal_from is not None:
+        allocation["renewal_from"] = renewal_from
     deployment["allocations"].append(allocation)
     atomic_record(directory / "deployment.json", deployment)
     control = config.control
+    logs = log_directory(config, "service", fallback=directory)
     extra = [
         "--partition",
         control.partition,
@@ -120,9 +124,9 @@ def _submit_control(config, directory, deployment, role, client, *, exclude_host
         "--signal=B:USR1@90",
         "--no-requeue",
         "--output",
-        str(directory / f"control-{token}.out"),
+        str(logs / f"control-{token}.out"),
         "--error",
-        str(directory / f"control-{token}.err"),
+        str(logs / f"control-{token}.err"),
     ]
     if control.account:
         extra += ["--account", control.account]
@@ -207,6 +211,9 @@ def start_service(config, hosting=None, standby=None, *, slurm=None) -> dict:
         config.control.hosting = hosting
     if standby is not None:
         config.control.standby_replicas = standby
+    from .renewal import validate_settings
+
+    validate_settings(config)
     directory = Path(config.state_dir) / "service"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     check_version(locate_binary(config.control.hq_binary), python=True)
@@ -261,7 +268,8 @@ def start_service(config, hosting=None, standby=None, *, slurm=None) -> dict:
         atomic_record(directory / "deployment.json", deployment)
         base = [sys.executable, "-m", "hyper_hyperqueue.service.supervisor", "run", "--config", str(path)]
         if config.control.hosting == "local":
-            with (directory / "supervisor.log").open("ab") as log:
+            logs = log_directory(config, "service", fallback=directory)
+            with (logs / "supervisor.log").open("ab") as log:
                 process = subprocess.Popen(
                     base,
                     stdin=subprocess.DEVNULL,
@@ -546,6 +554,82 @@ def _verify_old_workers(config, previous, *, terminal_proof=None):
             raise LeadershipError("Old worker is still alive; wait for stop or fence before journal replay")
 
 
+def finish_completed_service(config, guard, backend, shutdown, *, client=None):
+    """Final atomic completion barrier. New imports cannot race the decision.
+
+    Only a fresh controller reconciliation can begin this path. It never cancels
+    running workers; they have already idled out with positive terminal evidence.
+    Running standbys observe desired_state=STOPPED and exit their wait loop.
+    """
+    if not config.control.stop_when_complete:
+        return False
+    from ..backends.slurm import SlurmClient, matches_submission
+    from ..state import StateStore
+    from .completion import hq_settled, work_status
+
+    store = StateStore(config.state_dir)
+    directory = store.root / "service"
+    report = read_record(store.root / "controller_status.json", {})
+    completion = report.get("completion", {})
+    if (report.get("state") != "healthy" or not completion.get("ready")
+            or completion.get("epoch") != guard.epoch
+            or time.time() - completion.get("observed_at", 0)
+            > 2 * config.policy.reconcile_interval_seconds + 30):
+        return False
+    with store.lock():
+        guard.assert_owned()
+        status = work_status(store, report.get("retry_decisions", []))
+        if not status["settled"] or not hq_settled(store, backend):
+            return False
+        if any(worker.get("ended") is None for worker in backend.workers()):
+            return False
+        # Serializes standby maintenance and explicit service stop/start.
+        with (directory / "bootstrap.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            guard.assert_owned()
+            deployment = read_record(directory / "deployment.json", {})
+            if deployment.get("desired_state") == "STOPPED":
+                return False  # Explicit operator drain/stop retains its own meaning.
+            if deployment.get("hosting") == "slurm":
+                client = client or SlurmClient()
+                for allocation in deployment.get("allocations", []):
+                    if (str(allocation.get("job_id")) == str(guard.record.get("slurm_job_id"))
+                            or allocation.get("status") == "rejected"
+                            or allocation.get("terminal_evidence")):
+                        continue
+                    found = client.find_submission(
+                        allocation["token"], since=allocation.get("created_at", deployment["created_at"])
+                    )
+                    if not found or not all(
+                        matches_submission(row, allocation["token"], client.user) for row in found
+                    ):
+                        return False
+                    pending = [row for row in found if row.state == "PENDING"]
+                    if pending:
+                        allocation["completion_cancel_requested_at"] = time.time()
+                        atomic_record(directory / "deployment.json", deployment)
+                        client.cancel_pending([row.job_id for row in pending], allocation["token"])
+                        return False  # Confirm on a later observation, not the scancel response.
+                    if all(row.terminal for row in found):
+                        allocation["terminal_evidence"] = [row.to_dict() for row in found]
+                    elif any(row.state != "RUNNING" for row in found):
+                        return False
+                    # An already-running standby exits on desired_state=STOPPED.
+            receipt = {"schema": "hhq-completion-shutdown/1", "phase": "closing", "epoch": guard.epoch,
+                       "owner_id": guard.owner_id, "deployment_id": deployment.get("deployment_id"),
+                       "committed_at": time.time(), "counts": status["counts"],
+                       "reason": "all_registered_work_settled"}
+            deployment.update(desired_state="STOPPED", completion=receipt)
+            atomic_record(directory / "deployment.json", deployment)
+            atomic_record(directory / "completion.json", receipt)
+            # Keep the mutation barrier through actual child shutdown. An import
+            # waiting for this lock must explicitly restart the completed service.
+            shutdown()
+            receipt.update(phase="children_stopped", children_stopped_at=time.time())
+            atomic_record(directory / "completion.json", receipt)
+            return True
+
+
 def run_supervisor(
     config,
     config_path: Path,
@@ -556,6 +640,20 @@ def run_supervisor(
     no_controller=False,
     max_seconds=None,
 ):
+    from .renewal import (
+        RenewalNotNeeded,
+        announce_waiting,
+        cancel_if_unneeded,
+        drain_workers,
+        early_renewal_due,
+        prepare_successor,
+        record_handoff,
+        successor_ready,
+        takeover_proof,
+        validate_settings,
+    )
+
+    validate_settings(config)
     if threading.active_count() != 1:
         raise LeadershipError("Supervisor must run in its own single-threaded process")
     directory = Path(config.state_dir) / "service"
@@ -563,6 +661,22 @@ def run_supervisor(
     guard = LeadershipGuard(directory)
     hq = controller = None
     stopped = {"value": False, "drain": False}
+    successor = handoff_workers = None
+    renewal_wait_until = time.monotonic() + config.control.renew_lead_seconds + 300
+    if role == "renewal":
+        from ..worker import allocation_remaining
+
+        own_remaining = allocation_remaining()
+        declared = [a for a in read_record(directory / "deployment.json", {}).get("allocations", [])
+                    if a.get("token") == deployment_token]
+        predecessor_end = (declared[0].get("renewal_from", {}).get("control_end_time") if declared else None)
+        predecessor_end = predecessor_end or read_record(directory / "endpoint.json", {}).get("control_end_time")
+        bounds = [renewal_wait_until]
+        if own_remaining is not None:
+            bounds.append(time.monotonic() + max(0, own_remaining - 60))
+        if predecessor_end is not None:
+            bounds.append(time.monotonic() + max(0, predecessor_end - time.time()) + 300)
+        renewal_wait_until = min(bounds)
 
     def handle(signum, _frame):
         stopped["value"] = signum != signal.SIGUSR1
@@ -579,7 +693,22 @@ def run_supervisor(
                 return  # An expiring/stopped standby must not fence a healthy owner.
             previous = read_record(directory / "leader.json")
             proof = None
-            if previous and role == "active" and not config.control.standby_replicas:
+            if role == "renewal":
+                if previous and previous.get("state") == "STOPPED":
+                    renewal_wait_until = min(renewal_wait_until, time.monotonic() + 300)
+                try:
+                    announce_waiting(config, previous, deployment_token, os.environ.get("SLURM_JOB_ID"))
+                    proof = takeover_proof(config, previous, deployment_token, os.environ.get("SLURM_JOB_ID"))
+                except RenewalNotNeeded:
+                    return
+                except LeadershipError as exc:
+                    atomic_record(directory / f"renewal-wait-{deployment_token}.json",
+                                  {"status": "blocked", "reason": str(exc), "at": time.time()})
+                    if time.monotonic() >= renewal_wait_until:
+                        raise
+                    time.sleep(15)
+                    continue
+            elif previous and role == "active" and not config.control.standby_replicas:
                 proof = _terminal_generation_proof(config, previous)
             elif previous and previous.get("state") != "STOPPED":
                 if (role == "standby" or config.control.hosting == "slurm") and time.time() - previous.get(
@@ -624,7 +753,8 @@ def run_supervisor(
         if config.control.worker_port:
             args += ["--worker-port", str(config.control.worker_port)]
         env = dict(os.environ, HHQ_LEADER_FD=str(guard.fd), HHQ_SERVER_EPOCH=str(guard.epoch))
-        with (directory / f"hq-{guard.epoch}.log").open("ab") as log:
+        logs = log_directory(config, "service", fallback=directory)
+        with (logs / f"hq-{guard.epoch}.log").open("ab") as log:
             hq = subprocess.Popen(
                 args,
                 stdout=log,
@@ -676,6 +806,8 @@ def run_supervisor(
         failures, next_restart = 0, 0.0
         started = time.monotonic()
         next_standby_check = 0.0
+        next_completion_check = 0.0
+        next_renewal_check = 0.0
         while not stopped["value"]:
             guard.assert_owned()
             request = read_record(directory / "control_request.json", {})
@@ -685,7 +817,44 @@ def run_supervisor(
             if hq.poll() is not None:
                 guard.heartbeat("SUSPECT")
                 raise HQError("HQ server exited; stop admission and fence old workers before recovery")
-            if not stopped["drain"] and time.monotonic() >= next_standby_check:
+            if not stopped["drain"] and time.monotonic() >= next_completion_check:
+                try:
+                    if finish_completed_service(
+                        config, guard, backend, lambda controller=controller: (_terminate(controller), _terminate(hq))
+                    ):
+                        break
+                except (OSError, RuntimeError, TypeError, subprocess.TimeoutExpired) as exc:
+                    atomic_record(directory / "completion_error.json",
+                                  {"epoch": guard.epoch, "error": str(exc), "at": time.time()})
+                next_completion_check = time.monotonic() + config.policy.reconcile_interval_seconds
+            completion = read_record(Path(config.state_dir) / "controller_status.json", {}).get("completion", {})
+            finishing = (completion.get("epoch") == guard.epoch
+                         and completion.get("work", {}).get("settled") is True)
+            remaining = endpoint["control_end_time"] - time.time() if endpoint["control_end_time"] else None
+            if (config.control.auto_renew and not successor and not finishing
+                    and read_record(directory / "deployment.json", {}).get("desired_state") == "RUNNING"
+                    and (stopped["drain"] or remaining is not None and remaining <= config.control.renew_lead_seconds
+                         or early_renewal_due(config, guard))
+                    and time.monotonic() >= next_renewal_check):
+                try:
+                    planned = prepare_successor(config, guard)
+                    atomic_record(directory / "renewal_status.json", {**planned, "at": time.time()})
+                    if planned["status"] in {"accepted", "unknown", "submitting"}:
+                        successor = planned
+                except (LeadershipError, OSError, RuntimeError) as exc:
+                    atomic_record(directory / "renewal_status.json",
+                                  {"status": "blocked", "reason": str(exc), "at": time.time()})
+                next_renewal_check = time.monotonic() + 30
+            if successor and not stopped["drain"] and time.monotonic() >= next_renewal_check:
+                try:
+                    ready = successor_ready(config, guard, successor)
+                    atomic_record(directory / "renewal_readiness.json", {**ready, "at": time.time()})
+                    stopped["drain"] = ready["ready"]
+                except (LeadershipError, OSError, RuntimeError) as exc:
+                    atomic_record(directory / "renewal_readiness.json",
+                                  {"ready": False, "reason": str(exc), "at": time.time()})
+                next_renewal_check = time.monotonic() + 15
+            if not stopped["drain"] and not finishing and time.monotonic() >= next_standby_check:
                 try:
                     renewal = maintain_standby(config, guard)
                     atomic_record(directory / "standby_maintenance.json", {**renewal, "at": time.time()})
@@ -699,7 +868,22 @@ def run_supervisor(
                 _terminate(controller)
                 endpoint["status"] = "DRAINING"
                 atomic_record(directory / "endpoint.json", endpoint)
-                if not any(w.get("ended") is None for w in backend.workers()):
+                if successor:
+                    if time.monotonic() >= next_renewal_check:
+                        try:
+                            cancel_if_unneeded(config, guard, successor, backend)
+                            workers = drain_workers(config, guard)
+                            atomic_record(directory / "renewal_drain.json", workers)
+                            if workers["settled"] and not any(w.get("ended") is None for w in backend.workers()):
+                                backend.json("journal", "flush")
+                                workers["journal_flushed_at"] = time.time()
+                                handoff_workers = workers
+                                break
+                        except (LeadershipError, OSError, RuntimeError) as exc:
+                            atomic_record(directory / "renewal_drain.json",
+                                          {"settled": False, "reason": str(exc), "at": time.time()})
+                        next_renewal_check = time.monotonic() + 15
+                elif not any(w.get("ended") is None for w in backend.workers()):
                     break
             elif not no_controller and time.monotonic() >= next_restart:
                 if controller is None or controller.poll() is not None:
@@ -707,7 +891,7 @@ def run_supervisor(
                         failures += 1
                     if failures >= config.policy.max_rpc_failures:
                         raise LeadershipError("Repeated controller exits; admission circuit breaker opened")
-                    with (directory / f"controller-{guard.epoch}.log").open("ab") as log:
+                    with (logs / f"controller-{guard.epoch}.log").open("ab") as log:
                         controller = subprocess.Popen(
                             command,
                             stdout=log,
@@ -723,16 +907,26 @@ def run_supervisor(
                 break
             time.sleep(0.5)
     finally:
+        if successor and guard.fd is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                # Explicit stop can arrive between drain polls. It still vetoes
+                # the successor before this control exits.
+                cancel_if_unneeded(config, guard, successor, backend,
+                                   abort=stopped["value"] or handoff_workers is None)
         _terminate(controller)
         _terminate(hq)
         if guard.fd is not None:
-            with contextlib.suppress(OSError, LeadershipError):
-                atomic_record(
-                    directory / "endpoint.json",
-                    {"epoch": guard.epoch, "status": "STOPPED", "stopped_at": time.time()},
-                )
-                guard.close(children_quiescent=True)
-            guard.close()
+            try:
+                if successor and handoff_workers and not stopped["value"]:
+                    record_handoff(config, guard, successor, handoff_workers)
+            finally:
+                with contextlib.suppress(OSError, LeadershipError):
+                    atomic_record(
+                        directory / "endpoint.json",
+                        {"epoch": guard.epoch, "status": "STOPPED", "stopped_at": time.time()},
+                    )
+                    guard.close(children_quiescent=True)
+                guard.close()
         for signum, handler in original_signals.items():
             signal.signal(signum, handler)
 
@@ -741,7 +935,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=["run"])
     p.add_argument("--config", required=True, type=Path)
-    p.add_argument("--role", choices=["active", "standby"], default="active")
+    p.add_argument("--role", choices=["active", "standby", "renewal"], default="active")
     p.add_argument("--deployment-token")
     p.add_argument("--no-controller", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args(argv)

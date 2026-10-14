@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hyper_hyperqueue.ingest import ingest_file, parse_file
+from hyper_hyperqueue.ingest import import_campaign_id, ingest_file, parse_file
 from hyper_hyperqueue.state import StateStore, atomic_json, ensure_directory, read_json
 
 
@@ -136,3 +136,15 @@ def test_literal_empty_file_has_no_line_but_blank_line_is_an_occurrence():
 
     assert parse_bytes(b"", literal=True) == []
     assert len(parse_bytes(b"\n", literal=True)) == 1
+
+
+def test_initial_import_identity_remains_compatible_with_saved_campaigns(tmp_path):
+    # Known schema-1 identity, independent of the implementation under test.
+    expected = "c_9f86d081884c7d659a2feaa0"
+    assert import_campaign_id("test") == expected
+    source = tmp_path / "commands.txt"
+    source.write_text("true\n")
+    campaign = ingest_file(
+        StateStore(tmp_path / "state"), source, mode="direct", cwd=tmp_path, import_key="test"
+    )
+    assert campaign["campaign_id"] == expected

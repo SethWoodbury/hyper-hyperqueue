@@ -38,7 +38,7 @@ def locate_binary(explicit: str | None = None) -> str:
             candidate = str(default)
     if not candidate:
         raise HQError(
-            f"HQ {HQ_VERSION} is not installed. Direct mode remains available; see docs/decisions/hq.md"
+            f"HQ {HQ_VERSION} is not installed. Direct mode remains available; see docs/decisions/001-hyperqueue-boundary.md"
         )
     return str(Path(candidate).expanduser().resolve())
 
@@ -93,10 +93,12 @@ def task_resources(task, *, default_runtime_seconds: float = 300) -> list[dict]:
 
 
 class HQBackend:
-    def __init__(self, server_dir: str | Path, binary: str | None = None, *, timeout: float = 30):
+    def __init__(self, server_dir: str | Path, binary: str | None = None, *, timeout: float = 30,
+                 log_dir: str | Path | None = None):
         self.server_dir = Path(server_dir)
         self.binary = locate_binary(binary)
         self.timeout = timeout
+        self.log_dir = Path(log_dir) if log_dir is not None else self.server_dir.parent / "task_logs"
         check_version(self.binary)
 
     def json(self, *args: str):
@@ -166,7 +168,7 @@ class HQBackend:
                 "Intent already exists; adopt its mappings rather than submitting again"
             )
         payload = {"server_dir": str(self.server_dir), "name": self.intent_name(intent_token), "tasks": []}
-        logs = self.server_dir.parent / "task_logs" / intent_token
+        logs = self.log_dir / intent_token
         logs.mkdir(parents=True, exist_ok=True, mode=0o700)
         for index, t in enumerate(tasks):
             env = {"HHQ_CAMPAIGN_ID": t.campaign_id, "HHQ_TASK_ID": t.task_id}

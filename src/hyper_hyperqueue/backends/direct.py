@@ -11,6 +11,9 @@ import sys
 import uuid
 from pathlib import Path
 
+from ..adaptive_recovery import effective_config, effective_task
+from ..allocation_budget import budget_admission
+from ..logs import log_directory
 from ..models import Config, Profile, Resources
 from ..planner import array_plan, compatible, shared_budget_usage
 from ..state import StateStore, atomic_json, utc_now
@@ -132,10 +135,12 @@ def submit_ready(
         if str(j.get("job_id")).split("_")[0] not in owned_ids
     )
     available = max(0, config.policy.max_direct_submitted - occupied - external)
+    base_profiles = dict(config.profiles)
+    config = effective_config(store, config, [store.task(campaign_id, tid) for tid in ready])
     # Group homogeneous task resources; the default imports are homogeneous but JSONL may differ.
     groups = {}
     for tid in ready:
-        task = store.task(campaign_id, tid)
+        task = effective_task(store, store.task(campaign_id, tid))
         if hasattr(task, "model_dump"):
             task = task.model_dump()
         key = json.dumps([task["resources"], task["allowed_profiles"]], sort_keys=True)
@@ -174,7 +179,8 @@ def submit_ready(
         )
         if name is None:
             continue
-        profile = config.profiles[name]
+        profile = config.profiles[name].model_copy(update={
+            "memory_mib": max(base_profiles[name].memory_mib, resources.memory_mib)})
         group_available = available
         if profile.budget:
             group_available = min(
@@ -189,9 +195,14 @@ def submit_ready(
             available_submissions=group_available,
         )
         for array in arrays:
+            allocation_budget = budget_admission(store, config, profile, elements=array["elements"])
+            if not allocation_budget["allowed"]:
+                return {"submitted_arrays": submissions, "unsent_tasks": unsent,
+                        "reason": allocation_budget["reason"], "allocation_budget": allocation_budget}
             token = uuid.uuid4().hex
             directory = store.root / "submissions" / token
             directory.mkdir(parents=True, mode=0o700)
+            logs = log_directory(config, "allocations", token, fallback=directory)
             mapping_dir = directory / "mapping"
             mapping_dir.mkdir()
             for index, task_ids in enumerate(array["mapping"]):
@@ -215,9 +226,9 @@ def submit_ready(
                 "--array",
                 spec,
                 "--output",
-                str(directory / "%A_%a.slurm.out"),
+                str(logs / "%A_%a.slurm.out"),
                 "--error",
-                str(directory / "%A_%a.slurm.err"),
+                str(logs / "%A_%a.slurm.err"),
             ]
             task_ids = [tid for group in array["mapping"] for tid in group]
             intent = {

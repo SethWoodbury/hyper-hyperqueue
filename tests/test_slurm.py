@@ -234,6 +234,62 @@ def test_cancel_array_parent_checks_every_expanded_element():
     assert len(fake.calls) == 1
 
 
+def test_cancel_pending_requires_server_side_state_filter():
+    # The job may become RUNNING after this snapshot. --ctld makes Slurm apply
+    # PENDING at cancellation, rather than scancel filtering before a signal RPC.
+    row = dict(job(), job_state=["PENDING"])
+    fake = Fake({"jobs": [row]}, {"returncode": 0})
+    result = SlurmClient("alice", fake).cancel_pending(["123"], "token123")
+    assert result.returncode == 0
+    assert fake.calls[-1] == ["scancel", "--ctld", "--state=PENDING", "--user=alice", "123"]
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED"])
+def test_cancel_pending_leaves_started_allocations_untouched(state):
+    fake = Fake({"jobs": [dict(job(), job_state=[state])]})
+    result = SlurmClient("alice", fake).cancel_pending(["123"], "token123")
+    assert result.returncode == 0 and result.argv == []
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [[], [dict(job(), user_name="bob")], [dict(job(), comment="hhq:foreign")],
+     [dict(job(), comment="")]],
+)
+def test_cancel_pending_refuses_missing_or_unproven_live_identity(rows):
+    fake = Fake({"jobs": rows})
+    with pytest.raises(SlurmError, match="ownership not proven"):
+        SlurmClient("alice", fake).cancel_pending(["123"], "token123")
+    assert len(fake.calls) == 1
+
+
+def test_cancel_pending_validates_every_id_before_canceling_any():
+    rows = [dict(job(), job_state=["PENDING"]),
+            dict(job(), job_id=124, job_state=["PENDING"], comment="hhq:foreign")]
+    fake = Fake({"jobs": rows})
+    with pytest.raises(SlurmError, match="ownership not proven"):
+        SlurmClient("alice", fake).cancel_pending(["123", "124"], "token123")
+    assert len(fake.calls) == 1
+
+
+def test_cancel_pending_mixed_array_keeps_controller_filter():
+    rows = [dict(job(array_job_id=100, array_task_id=1), job_state=["PENDING"]),
+            job(array_job_id=100, array_task_id=2)]
+    fake = Fake({"jobs": rows}, {"returncode": 0})
+    SlurmClient("alice", fake).cancel_pending(["100"], "token123")
+    assert fake.calls[-1] == ["scancel", "--ctld", "--state=PENDING", "--user=alice", "100"]
+
+
+def test_cancel_pending_does_not_fallback_after_uncertain_response():
+    fake = Fake({"jobs": [dict(job(), job_state=["PENDING"])]},
+                {"returncode": None, "timed_out": True})
+    with pytest.raises(SlurmError):
+        SlurmClient("alice", fake).cancel_pending(["123"], "token123")
+    assert len(fake.calls) == 2
+    assert fake.calls[-1][1:3] == ["--ctld", "--state=PENDING"]
+
+
 def test_discovery_unknown_is_not_infinity_or_empty_user_queue():
     raw = {
         "config_text": {

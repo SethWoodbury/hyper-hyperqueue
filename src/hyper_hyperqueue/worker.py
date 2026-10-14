@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 import re
+import signal
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -118,6 +120,123 @@ def worker_argv(config, profile_name: str, assigned: dict, *, remaining_seconds:
     return argv
 
 
+def run_worker_phase(command, *, clock=time.time):
+    """Keep a small parent to distinguish natural lifetime expiry from signals."""
+    started = clock()
+    lifetime = int(command[command.index("--time-limit") + 1][:-1])
+    received, previous = [], {}
+    process = subprocess.Popen(command)
+
+    def forward(signum, _frame):
+        received.append(signum)
+        if process.poll() is None:
+            try:
+                process.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGUSR1):
+        previous[signum] = signal.signal(signum, forward)
+    try:
+        code = process.wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    finished = clock()
+    return {"started": started, "configured_end_time": started + lifetime,
+            "finished": finished, "returncode": code, "received_signals": received,
+            "termination_reason": ("signal" if received or code < 0 else
+                                   "time_limit" if finished >= started + lifetime else "normal_exit")}
+
+
+def select_fallback(store, config, primary, assigned, epoch, token, remaining, *, clock=None):
+    """One conservative phase switch after idle exit; admitted HQ tasks never change.
+
+    Caller holds StateStore.lock. A compatible running/unknown primary worker
+    blocks fallback. Pending allocations are not available worker capacity yet.
+    """
+    from datetime import datetime
+
+    from .adaptive_recovery import effective_task
+    from .models import Resources
+    from .planner import ACTIVE_INTENT_STATES, compatible
+    from .service.completion import work_status
+    from .state import read_json
+
+    clock = time.time() if clock is None else clock
+    try:
+        endpoint = read_json(store.root / "service/endpoint.json")
+        status = read_json(store.root / "controller_status.json")
+        deployment = read_json(store.root / "service/deployment.json")
+        controls = read_json(store.root / "controls.json") if (store.root / "controls.json").exists() else {}
+    except (OSError, ValueError):
+        return None
+    if deployment.get("desired_state") != "RUNNING":
+        return None
+    if (endpoint.get("epoch") != epoch or endpoint.get("status") != "ACTIVE"
+            or status.get("epoch") != epoch or status.get("state") != "healthy"):
+        return None
+    try:
+        age = clock - datetime.fromisoformat(status["at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not 0 <= age <= max(30, 2 * config.policy.reconcile_interval_seconds):
+        return None
+    if endpoint.get("control_end_time") is not None and endpoint["control_end_time"] <= clock + config.policy.cleanup_seconds:
+        return None
+    blockers = work_status(store, status.get("retry_decisions", []))["blockers"]
+    if any("token" in row for row in blockers):
+        return None
+    blocked = {row.get("task_id") for row in blockers}
+    waiting, primary_seen = [], False
+    for campaign in store.campaigns():
+        if campaign["mode"] != "pooled":
+            continue
+        for tid in store.task_ids(campaign["campaign_id"]):
+            task = effective_task(store, store.task(campaign["campaign_id"], tid))
+            state = store.task_state(task.campaign_id, tid).get("state")
+            if not task.allowed_profiles or primary in task.allowed_profiles:
+                primary_seen = True
+                if tid in blocked or state not in {"succeeded", "failed", "canceled"}:
+                    return None
+            if not campaign.get("draining") and not campaign.get("pause_dispatch") and state == "submitted":
+                waiting.append(task)
+    if not primary_seen:
+        return None
+    observed = {row["token"]: row for row in status.get("worker_capacity", [])}
+    active = [row for row in store.intents() if row.get("backend") == "worker"
+              and row.get("state") in ACTIVE_INTENT_STATES and row["token"] != token]
+    for target in config.profiles[primary].fallback_profiles:
+        if primary in controls.get("paused_pools", []) or target in controls.get("paused_pools", []):
+            continue
+        placement = ("partition", "account", "qos", "gres", "constraint", "exclude", "gpu_models", "min_vram_mib")
+        if any(getattr(config.profiles[target], key) != getattr(config.profiles[primary], key) for key in placement):
+            continue  # An alias cannot bypass a task's permitted hardware or queue.
+        physical = config.profiles[primary].model_copy(update={
+            "cpus": assigned["cpus"], "memory_mib": assigned["memory_mib"],
+            "allocation_seconds": max(1, int(remaining)),
+        })
+        candidates = [task for task in waiting if (not task.allowed_profiles or target in task.allowed_profiles)
+                      and compatible(Resources.model_validate(task.resources), physical, config)[0]]
+        if not candidates:
+            continue
+        # All routes already allowed for the waiting tasks count as primary
+        # capacity; a fresh phase claim also blocks another opportunistic worker.
+        routes = {p for task in candidates for p in task.allowed_profiles}
+        blocked_capacity = False
+        for allocation in active:
+            route = allocation.get("dispatch_profile", allocation["profile"])
+            if routes and route not in routes:
+                continue
+            evidence = observed.get(allocation["token"])
+            if allocation.get("dispatch_profile") or not evidence or evidence["state"] != "PENDING":
+                blocked_capacity = True
+                break
+        if not blocked_capacity:
+            return target
+    return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", required=True)
@@ -208,7 +327,52 @@ def main(argv=None):
     # logical GPU slot prevents concurrent GPU tasks without VRAM assumptions.
     work = tempfile.mkdtemp(prefix="hhq-worker-")
     command.extend(["--work-dir", work])
-    os.execv(command[0], command)
+    from .state import StateStore
+
+    store = StateStore(config.state_dir)
+    token = os.environ.get("HHQ_ALLOCATION_TOKEN")
+    record = {"schema_version": 1, "epoch": args.epoch, "profile": args.profile,
+              "slurm_job_id": os.environ.get("SLURM_JOB_ID"), "allocation_token": token}
+    first = run_worker_phase(command)
+    phases = [{"dispatch_profile": args.profile, **first}]
+    # One phase change only, after a normal exit lasting at least the idle grace.
+    # A time limit, signal, lost/stale controller or unresolved work never switches.
+    if (config.profiles[args.profile].fallback_profiles and first["returncode"] == 0
+            and first["termination_reason"] == "normal_exit"
+            and first["finished"] - first["started"] >= config.policy.worker_idle_seconds):
+        remaining = allocation_remaining()
+        bound = first["configured_end_time"] - time.time() + config.policy.cleanup_seconds
+        remaining = min(remaining, bound) if remaining is not None else bound
+        with store.lock():
+            target = select_fallback(store, config, args.profile, assigned, args.epoch, token, remaining)
+            if target:
+                owned = [i for i in store.intents() if i.get("token") == token and i.get("epoch") == args.epoch]
+                if len(owned) != 1:
+                    target = None
+                else:
+                    intent = owned[0]
+                    intent.update(dispatch_profile=target, fallback_started=time.time())
+                    store.put_intent(intent)
+        if target:
+            # A server lost between the last controller report and this phase
+            # switch is not permission to create a new worker generation.
+            from .backends.hyperqueue import HQBackend, HQError
+
+            try:
+                HQBackend(store.root / "service/hq", command[0]).json("server", "info")
+            except (HQError, OSError):
+                target = None
+        if target:
+            os.environ["HHQ_WORKER_PROFILE"] = target
+            phase_config = config.model_copy(deep=True)
+            phase_config.profiles[target].allocation_seconds = config.profiles[args.profile].allocation_seconds
+            second = worker_argv(phase_config, target, assigned, remaining_seconds=int(remaining))
+            second.extend(["--work-dir", work])
+            phases.append({"dispatch_profile": target, **run_worker_phase(second)})
+    atomic_json(store.root / "service/worker_exits" / f"{identity}.json",
+                {**record, **phases[-1], "phases": phases})
+    code = phases[-1]["returncode"]
+    raise SystemExit(code if code >= 0 else 128 - code)
 
 
 if __name__ == "__main__":

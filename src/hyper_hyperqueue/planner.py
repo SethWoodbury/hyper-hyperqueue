@@ -176,6 +176,52 @@ def job_dict(job):
 ACTIVE_INTENT_STATES = {"intent", "unknown", "submitted", "running"}
 
 
+def fits_remaining_control(task, config, remaining_seconds):
+    """Both the dispatch estimate and any hard timeout must fit this generation."""
+    if remaining_seconds is None:
+        return True
+    resources = Resources.model_validate(task["resources"])
+    duration = max(resources.runtime_seconds or config.policy.unknown_runtime_seconds,
+                   resources.timeout_seconds or 0)
+    return duration + config.policy.cleanup_seconds <= remaining_seconds
+
+
+def _budget_applies(budget, placement):
+    return all(
+        not expected or not placement.get(key) or placement[key] in expected
+        for key, expected in (
+            ("partition", budget.partitions),
+            ("account", [budget.account] if budget.account else []),
+            ("qos", [budget.qos] if budget.qos else []),
+        )
+    )
+
+
+def _profile_budgets(config, profile):
+    placement = {key: getattr(profile, key) for key in ("partition", "account", "qos")}
+    # The explicitly assigned budget remains binding even if its scope is misconfigured.
+    return {
+        name
+        for name, budget in config.budgets.items()
+        if name == profile.budget or _budget_applies(budget, placement)
+    }
+
+
+def _budget_priority(config, name):
+    try:
+        return config.policy.budget_priority.index(name)
+    except ValueError:
+        return len(config.policy.budget_priority)
+
+
+def _positive_worker_job(job, allocation):
+    token = allocation.get("token")
+    return bool(token) and (
+        job.get("comment") == "hhq:" + token
+        or (not job.get("comment") and str(job.get("name", "")).endswith("-" + token))
+    ) and (allocation.get("job_id") is None or str(job["job_id"]) == str(allocation["job_id"]))
+
+
 def shared_budget_usage(config: Config, jobs: list, reservations: list[dict]) -> Counter:
     """Count each live external job or durable allocation reservation exactly once.
 
@@ -190,6 +236,8 @@ def shared_budget_usage(config: Config, jobs: list, reservations: list[dict]) ->
     observed = [job_dict(row) for row in jobs]
 
     def belongs(job, reservation):
+        if config.policy.speculative_partition_workers and reservation.get("backend") == "worker":
+            return _positive_worker_job(job, reservation)
         parent = str(job.get("array_job_id") or job["job_id"]).split("_")[0]
         return (reservation.get("job_id") is not None and parent == str(reservation["job_id"])) or (
             bool(reservation.get("token"))
@@ -203,11 +251,7 @@ def shared_budget_usage(config: Config, jobs: list, reservations: list[dict]) ->
     for name, budget in config.budgets.items():
 
         def applies(partition, account, qos, budget=budget):
-            return (
-                (not budget.partitions or not partition or partition in budget.partitions)
-                and (not budget.account or not account or account == budget.account)
-                and (not budget.qos or not qos or qos == budget.qos)
-            )
+            return _budget_applies(budget, {"partition": partition, "account": account, "qos": qos})
 
         for row in active:
             placement = row.get("placement")
@@ -247,6 +291,258 @@ def shared_budget_usage(config: Config, jobs: list, reservations: list[dict]) ->
     return usage
 
 
+def _profile_waiting_priority(config, profile_name, ordered_tasks):
+    """Highest eligible waiting priority; callers supply descending-priority tasks.
+
+    Task priorities must influence allocation choice as well as HQ dispatch:
+    disjoint resource profiles cannot compete on the same existing HQ worker.
+    Zero-priority backlogs retain the previous weighted profile ordering.
+    """
+    if not ordered_tasks or (
+        ordered_tasks[0].get("priority", 0) == ordered_tasks[-1].get("priority", 0) == 0
+    ):
+        return 0  # No extra resource parsing for the default all-zero policy.
+    profile = config.profiles[profile_name]
+    for task in ordered_tasks:
+        if task.get("allowed_profiles") and profile_name not in task["allowed_profiles"]:
+            continue
+        resources = Resources.model_validate(task["resources"])
+        runtime = resources.runtime_seconds or config.policy.unknown_runtime_seconds
+        if (
+            compatible(resources, profile, config)[0]
+            and runtime + config.policy.cleanup_seconds <= profile.allocation_seconds
+            and (
+                config.control.hosting != "slurm"
+                or runtime + config.policy.cleanup_seconds <= config.control.walltime_seconds
+            )
+        ):
+            return task.get("priority", 0)
+    return 0
+
+
+def _pending_plan(config, tasks, jobs, owned, paused, usage, profile_counts):
+    """Reserve distinct waiting-task anchors, independent of running-worker lifetimes.
+
+    These anchors justify allocations; they do not bind HQ dispatch. Unacknowledged
+    allocations occupy pending slots until reconciliation proves their outcome.
+    External jobs and direct arrays constrain hard budgets but cannot supply this
+    service's worker reserve. Optional cross-partition speculation shares waiting
+    anchors between partitions, never task ownership or execution attempts.
+    """
+    targets = {
+        name: b.min_pending
+        for name, b in config.budgets.items()
+        if b.min_pending or b.fill_running_target or b.max_pending is not None
+    }
+    if not targets:
+        return [], {}, []
+    observed = [job_dict(job) for job in jobs]
+    pending, uncertain, running, planned = Counter(), Counter(), Counter(), Counter()
+    existing_reservations = []
+    demand = list(tasks)
+    partition_demand = {profile.partition: list(tasks) for profile in config.profiles.values()}
+
+    def waiting(profile_name):
+        if config.policy.speculative_partition_workers:
+            return partition_demand[config.profiles[profile_name].partition]
+        return demand
+
+    def reserve(profile_name, task, *, unknown=False):
+        pools = list(partition_demand.values()) if unknown and config.policy.speculative_partition_workers else [waiting(profile_name)]
+        for pool in pools:
+            if task in pool:
+                pool.remove(task)
+
+    def anchor(profile_name):
+        profile = config.profiles[profile_name]
+        for task in waiting(profile_name):
+            if task.get("allowed_profiles") and profile_name not in task["allowed_profiles"]:
+                continue
+            resources = Resources.model_validate(task["resources"])
+            runtime = resources.runtime_seconds or config.policy.unknown_runtime_seconds
+            if (
+                compatible(resources, profile, config)[0]
+                and runtime + config.policy.cleanup_seconds <= profile.allocation_seconds
+                and (
+                    config.control.hosting != "slurm"
+                    or runtime + config.policy.cleanup_seconds <= config.control.walltime_seconds
+                )
+            ):
+                return task
+        return None
+
+    for allocation in owned:
+        if allocation.get("state") not in ACTIVE_INTENT_STATES:
+            continue
+        profile_name = allocation["profile"]
+        profile = config.profiles[profile_name]
+        matches = [
+            job
+            for job in observed
+            if (allocation.get("job_id") is not None and str(job["job_id"]) == str(allocation["job_id"]))
+            or (allocation.get("token") and job.get("comment") == "hhq:" + allocation["token"])
+        ]
+        states = {str(job.get("state") or "UNKNOWN").split()[0].rstrip("+") for job in matches}
+        if config.policy.speculative_partition_workers and not all(_positive_worker_job(job, allocation) for job in matches):
+            states = {"UNKNOWN"}  # Job-number reuse cannot relax cross-partition reservations.
+        if "RUNNING" in states:
+            counts = running
+        elif states == {"PENDING"}:
+            counts = pending
+        else:
+            counts = uncertain
+        placement = allocation.get("placement") or (
+            {key: matches[0].get(key) for key in ("partition", "account", "qos")}
+            if matches
+            else {key: getattr(profile, key) for key in ("partition", "account", "qos")}
+        )
+        for name in targets:
+            if _budget_applies(config.budgets[name], placement):
+                counts[name] += 1
+        if counts is not running:
+            existing_reservations.append((profile_name, counts is uncertain))
+
+    # Resolve uncertain ownership conservatively before known partition-specific
+    # pending workers can exhaust its anchor pool. Unknown reservations bind all
+    # partitions; they never become an excuse for speculative duplicate capacity.
+    ordered_reservations = (
+        sorted(existing_reservations, key=lambda item: not item[1])
+        if config.policy.speculative_partition_workers else existing_reservations
+    )
+    for profile_name, unknown in ordered_reservations:
+        task = anchor(profile_name)
+        if task is not None:
+            reserve(profile_name, task, unknown=unknown)
+
+    # Optional eager growth is an operator's concurrency target, not a forecast
+    # of free nodes. Each pending worker still needs distinct waiting work.
+    for name in targets:
+        budget = config.budgets[name]
+        if budget.fill_running_target:
+            targets[name] = max(budget.min_pending, budget.running_target - running[name])
+
+    def slots(name):
+        return pending[name] + uncertain[name] + planned[name]
+
+    def profiles(name):
+        return sorted(
+            (n for n, p in config.profiles.items() if p.budget == name),
+            key=lambda n: (
+                profile_counts[n] >= config.profiles[n].min_workers,
+                -_profile_waiting_priority(config, n, waiting(n)),
+                profile_counts[n] / config.profiles[n].weight,
+                n,
+            ),
+        )
+
+    def blockers(name):
+        blocked = set()
+        names = profiles(name)
+        if not names:
+            blocked.add("NO_ELIGIBLE_PROFILES")
+        for profile_name in names:
+            profile = config.profiles[profile_name]
+            if profile_name in paused:
+                blocked.add("PROFILE_PAUSED_OR_GATED")
+                continue
+            if profile_counts[profile_name] >= profile.max_workers:
+                blocked.add("PROFILE_MAX_WORKERS")
+                continue
+            full = [
+                n for n in _profile_budgets(config, profile) if usage[n] >= config.budgets[n].max_submitted
+            ]
+            if full:
+                blocked.update(f"MAX_SUBMITTED:{n}" for n in full)
+                continue
+            pending_full = [n for n in _profile_budgets(config, profile)
+                            if config.budgets[n].max_pending is not None
+                            and slots(n) >= config.budgets[n].max_pending]
+            if pending_full:
+                blocked.update(f"MAX_PENDING:{n}" for n in pending_full)
+                continue
+            if anchor(profile_name) is None:
+                blocked.add("SHARED_WAITING_DEMAND_EXHAUSTED" if not waiting(profile_name) else "NO_COMPATIBLE_WAITING_TASK")
+                continue
+            return profile_name, blocked
+        return None, blocked
+
+    actions = []
+    while len(actions) < config.policy.max_submissions_per_cycle:
+        made = False
+        # Optional two-phase admission grows each route before replenishing reserves.
+        # A capped/incompatible growth route yields immediately to the next route.
+        phases = ("growth", "reserve") if config.policy.pending_reserves_after_growth else ("combined",)
+        selected = None
+        for phase in phases:
+            for name in sorted(targets, key=lambda n: (_budget_priority(config, n), slots(n) / max(1, targets[n]), n)):
+                target = targets[name]
+                if phase == "growth":
+                    target = (max(0, config.budgets[name].running_target - running[name])
+                              if config.budgets[name].fill_running_target else 0)
+                if slots(name) >= target:
+                    continue
+                profile_name, _ = blockers(name)
+                if profile_name is not None:
+                    selected = name, profile_name, phase
+                    break
+            if selected is not None:
+                break
+        if selected is not None:
+            name, profile_name, phase = selected
+            profile = config.profiles[profile_name]
+            task = anchor(profile_name)
+            reserve(profile_name, task)
+            actions.append(
+                {
+                    "profile": profile_name,
+                    "reason": (
+                        "FILL_RUNNING_TARGET"
+                        if phase == "growth" or (phase == "combined"
+                        and config.budgets[name].fill_running_target
+                        and slots(name) >= config.budgets[name].min_pending)
+                        else "MIN_PENDING_RESERVE"
+                    ),
+                    "covered_task_ids": [task["task_id"]],
+                }
+            )
+            profile_counts[profile_name] += 1
+            for budget_name in _profile_budgets(config, profile):
+                usage[budget_name] += 1
+                planned[budget_name] += 1
+            made = True
+        if not made:
+            break
+
+    status, reasons = {}, []
+    for name, target in targets.items():
+        deficit = max(0, target - slots(name))
+        blocked = set()
+        if deficit:
+            available, blocked = blockers(name)
+            if available is not None and len(actions) >= config.policy.max_submissions_per_cycle:
+                blocked.add("MAX_SUBMISSIONS_PER_CYCLE")
+            label = "WORKER_TARGET_DEFICIT" if config.budgets[name].fill_running_target else "MIN_PENDING_DEFICIT"
+            reasons.extend(f"{name}: {label} {deficit} ({reason})" for reason in sorted(blocked))
+        status[name] = {
+            "target": target,
+            "observed_pending": pending[name],
+            "uncertain_reservations": uncertain[name],
+            "observed_running": running[name],
+            "planned": planned[name],
+            "reserved_after_plan": slots(name),
+            "deficit_after_plan": deficit,
+            "blocked_by": sorted(blocked),
+            "max_pending": config.budgets[name].max_pending,
+        }
+        if config.budgets[name].fill_running_target:
+            status[name].update(
+                fill_running_target=True,
+                minimum_pending_target=config.budgets[name].min_pending,
+                running_target=config.budgets[name].running_target,
+            )
+    return actions, status, reasons
+
+
 def capacity_plan(
     config: Config,
     tasks: list[dict],
@@ -255,32 +551,60 @@ def capacity_plan(
     paused: set[str] | None = None,
     *,
     reservations: list[dict] | None = None,
+    remaining_control_seconds: float | None = None,
 ) -> dict:
-    """Greedy shared-backlog assignment; an eligible task is consumed only once.
+    """Greedy allocation planning over one shared execution backlog.
 
     Each proposed worker covers one allocation lifetime of estimated demand.
     Existing pending/running workers consume capacity first. No free-node gate.
+    Opt-in speculative reserves may cover the same waiting task in different
+    partitions; HQ still dispatches each task once, and surplus workers idle out.
     """
     paused = paused or set()
     usage = shared_budget_usage(config, jobs, owned if reservations is None else reservations)
-    remaining = sorted(tasks, key=lambda t: (-t.get("priority", 0), t.get("created_at", ""), t["task_id"]))
+    eligible = [t for t in tasks if fits_remaining_control(t, config, remaining_control_seconds)]
+    blocked_control = len(tasks) - len(eligible)
+    remaining = sorted(eligible, key=lambda t: (-t.get("priority", 0), t.get("created_at", ""), t["task_id"]))
     profile_counts = Counter(
         x["profile"] for x in owned if x.get("state") in ("intent", "unknown", "submitted", "running")
     )
+    actions, pending_status, reasons = _pending_plan(
+        config, remaining, jobs, owned, paused, usage, profile_counts
+    )
+    if blocked_control:
+        reasons.append(f"CONTROL_REMAINING_TOO_SHORT: {blocked_control} waiting task(s) deferred")
+    reserved_ids = {tid for action in actions for tid in action["covered_task_ids"]}
+    remaining = [task for task in remaining if task["task_id"] not in reserved_ids]
 
-    def consume(profile_name, remaining_seconds=None):
+    def consume(profile_name, remaining_seconds=None, reserved=()):
         profile = config.profiles[profile_name]
+        lifetime = profile.allocation_seconds if remaining_seconds is None else remaining_seconds
+        if remaining_control_seconds is not None:
+            lifetime = min(lifetime, remaining_control_seconds)
         seconds = max(
             0,
-            (profile.allocation_seconds if remaining_seconds is None else remaining_seconds)
-            - config.policy.cleanup_seconds,
+            lifetime - config.policy.cleanup_seconds,
         )
         if seconds <= 0:
             return []
         slots = 1 if gpu_count(profile) else profile.cpus
         budget_seconds = seconds * slots
-        used = 0.0
-        picked = []
+
+        def task_cost(task):
+            resources = Resources.model_validate(task["resources"])
+            duration = resources.runtime_seconds or config.policy.unknown_runtime_seconds
+            effective_cpus = max(
+                resources.cpus,
+                math.ceil(
+                    resources.memory_mib
+                    / max(1, profile.memory_mib - config.policy.worker_overhead_mib)
+                    * profile.cpus
+                ),
+            )
+            return duration * (1 if gpu_count(profile) else effective_cpus)
+
+        used = sum(task_cost(task) for task in reserved)
+        picked = [task["task_id"] for task in reserved]
         for task in list(remaining):
             if task.get("allowed_profiles") and profile_name not in task["allowed_profiles"]:
                 continue
@@ -289,15 +613,7 @@ def capacity_plan(
                 duration = resources.runtime_seconds or config.policy.unknown_runtime_seconds
                 if duration > seconds:
                     continue
-                effective_cpus = max(
-                    resources.cpus,
-                    math.ceil(
-                        resources.memory_mib
-                        / max(1, profile.memory_mib - config.policy.worker_overhead_mib)
-                        * profile.cpus
-                    ),
-                )
-                cost = duration * (1 if gpu_count(profile) else effective_cpus)
+                cost = task_cost(task)
                 if picked and used + cost > budget_seconds:
                     continue
                 picked.append(task["task_id"])
@@ -312,12 +628,17 @@ def capacity_plan(
     for allocation in owned:
         if allocation.get("state") in ("intent", "unknown", "submitted", "running"):
             consume(allocation["profile"], allocation.get("remaining_seconds"))
-    actions, reasons = [], []
+    task_by_id = {task["task_id"]: task for task in tasks}
+    for action in actions:
+        reserved = [task_by_id[tid] for tid in action["covered_task_ids"]]
+        action["covered_task_ids"] = consume(action["profile"], reserved=reserved)
     while remaining and len(actions) < config.policy.max_submissions_per_cycle:
         names = sorted(
             config.profiles,
             key=lambda n: (
+                _budget_priority(config, config.profiles[n].budget),
                 profile_counts[n] >= config.profiles[n].min_workers,
+                -_profile_waiting_priority(config, n, remaining),
                 profile_counts[n] / config.profiles[n].weight,
                 n,
             ),
@@ -334,19 +655,53 @@ def capacity_plan(
             cap = min(budget.max_submitted, budget.running_target + budget.pending_reserve)
             if usage[profile.budget] >= cap:
                 continue
+            scopes = _profile_budgets(config, profile) if pending_status else {profile.budget}
+            if any(usage[n] >= config.budgets[n].max_submitted for n in scopes):
+                continue
+            if any(config.budgets[n].max_pending is not None
+                   and pending_status.get(n, {}).get("reserved_after_plan", 0) >= config.budgets[n].max_pending
+                   for n in scopes):
+                continue
             picked = consume(name)
             if not picked:
                 continue
             actions.append({"profile": name, "reason": "READY_SHARED_BACKLOG", "covered_task_ids": picked})
-            usage[profile.budget] += 1
+            for scope in scopes:
+                usage[scope] += 1
+                if scope in pending_status:
+                    pending_status[scope]["reserved_after_plan"] += 1
             profile_counts[name] += 1
             made = True
             break  # Recompute weighted shares after each allocation.
         if not made:
             break
-    return {
+    result = {
         "actions": actions,
         "budget_usage_after_plan": dict(usage),
-        "uncovered_tasks": len(remaining),
+        "uncovered_tasks": len(remaining) + blocked_control,
         "reasons": sorted(set(reasons)),
     }
+    if remaining_control_seconds is not None:
+        result.update(control_remaining_seconds=max(0, remaining_control_seconds),
+                      control_remaining_blocked_tasks=blocked_control)
+    if config.policy.speculative_partition_workers:
+        covered = [tid for action in actions for tid in action["covered_task_ids"]]
+        result.update(speculative_partition_workers=True,
+                      speculative_anchor_reuses=len(covered) - len(set(covered)))
+    if pending_status:
+        for name, status in pending_status.items():
+            status["planned"] = sum(
+                name in _profile_budgets(config, config.profiles[action["profile"]]) for action in actions
+            )
+            status["reserved_after_plan"] = (
+                status["observed_pending"] + status["uncertain_reservations"] + status["planned"]
+            )
+            status["deficit_after_plan"] = max(0, status["target"] - status["reserved_after_plan"])
+            if not status["deficit_after_plan"]:
+                status["blocked_by"] = []
+                result["reasons"] = [
+                    r for r in result["reasons"]
+                    if not r.startswith((f"{name}: MIN_PENDING", f"{name}: WORKER_TARGET"))
+                ]
+        result["pending_reserves"] = pending_status
+    return result

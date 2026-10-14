@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import shlex
 import sys
 import time
@@ -14,8 +15,9 @@ from pathlib import Path
 
 from .backends.direct import resource_args, submit_ready
 from .config import load_config
+from .logs import log_directory
 from .models import Config, TaskSpec
-from .planner import capacity_plan
+from .planner import capacity_plan, fits_remaining_control
 from .runner import attempt_epoch, authorize_retry, internal_fencing_evidence
 from .state import StateStore, atomic_json
 
@@ -59,6 +61,24 @@ def assert_epoch(store, epoch):
     from .service.leadership import assert_epoch as guarded_epoch
 
     guarded_epoch(store.root / "service", epoch)
+
+
+def control_deadline(store, config, epoch):
+    """Read the actual current allocation's endpoint, never a prior generation."""
+    if epoch is None:
+        return None  # Direct-only reconciliation has no pooled controller lifetime.
+    path = store.root / "service/endpoint.json"
+    endpoint = json.loads(path.read_text()) if path.exists() else None
+    if endpoint is None and config.control.hosting == "local":
+        return None
+    if not endpoint or endpoint.get("epoch") != epoch or endpoint.get("status") != "ACTIVE":
+        raise RuntimeError("CONTROL_ENDPOINT_NOT_ACTIVE: no matching active controller endpoint")
+    deadline = endpoint.get("control_end_time")
+    if deadline is None and config.control.hosting == "local":
+        return None
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
+        raise RuntimeError("CONTROL_REMAINING_UNKNOWN: Slurm controller endpoint needs its real end time")
+    return deadline
 
 
 def reconcile_slurm(store, slurm, jobs):
@@ -170,6 +190,7 @@ def runner_argv(store, task):
 
 
 def admit_hq(store, config, hq, campaign, epoch):
+    from .adaptive_recovery import effective_task
     if campaign.get("draining") or campaign.get("pause_dispatch"):
         return
     existing = [
@@ -190,7 +211,7 @@ def admit_hq(store, config, hq, campaign, epoch):
             continue
         if store.task_state(campaign["campaign_id"], tid).get("state", "ready") in ("ready", "retry_wait"):
             task = store.task(campaign["campaign_id"], tid)
-            tasks.append(task if isinstance(task, TaskSpec) else TaskSpec.model_validate(task))
+            tasks.append(effective_task(store, task if isinstance(task, TaskSpec) else TaskSpec.model_validate(task)))
     if not tasks:
         return
     # Bounded submissions and durable identity; append creates another HQ job on
@@ -295,7 +316,14 @@ def reconcile_hq(store, hq):
 
 
 def retry_ready_failures(store, config, campaigns):
-    """One retry owner. Resultless work requires exact terminal Slurm ownership."""
+    """One retry owner. Interrupted work requires exact terminal Slurm ownership."""
+    from .adaptive_recovery import (
+        allocation_caused_failure,
+        save_scheduler_proof,
+        scheduler_proof,
+        user_canceled,
+    )
+
     decisions = []
     intents = store.intents()
     for campaign in campaigns:
@@ -308,88 +336,42 @@ def retry_ready_failures(store, config, campaigns):
                 continue
             task = store.task(cid, tid)
             attempt = state.get("latest_attempt")
-            if not attempt:
-                continue  # No task execution identity: operator/backend reconciliation required.
+            if not attempt or user_canceled(store, task):
+                continue
             reason = attempt.get("result", {}).get("reason") or state.get("reason")
             proof_path = None
             old_epoch = attempt_epoch(attempt)
             service_proof = store.root / "service" / f"recovery-{old_epoch}.json"
-            internal = (
-                internal_fencing_evidence(store, task, attempt, service_proof)
-                if old_epoch is not None and service_proof.exists()
-                else None
-            )
-            if state.get("state") == "canceled" and not internal:
-                continue
+            internal = (internal_fencing_evidence(store, task, attempt, service_proof)
+                        if old_epoch is not None and service_proof.exists() else None)
             if internal:
-                proof_path = service_proof
-                reason = "worker_lost"
-            elif "result" not in attempt:
-                env = attempt.get("context", {}).get("environment", {})
-                jid = env.get("SLURM_ARRAY_JOB_ID") or env.get("SLURM_JOB_ID")
-                exact = [
-                    i
-                    for i in intents
-                    if i.get("backend") in ("worker", "direct")
-                    and str(i.get("job_id")) == str(jid)
-                    and i.get("state") == "terminal"
-                ]
-                if len(exact) != 1:
+                proof_path, reason = service_proof, "worker_lost"
+            else:
+                proof = scheduler_proof(store, task, attempt)
+                # Slurm can positively classify a wrapper's generic exit137 or SIGTERM.
+                if proof and allocation_caused_failure(proof, attempt):
+                    reason = proof["reason"]
+                    if reason not in task.retry.reasons:
+                        continue
+                    proof_path = save_scheduler_proof(store, task, attempt, proof)
+                elif "result" not in attempt or state.get("state") == "canceled":
                     continue
-                allocation = exact[0]
-                if allocation.get("backend") == "worker" and str(allocation.get("epoch")) != old_epoch:
-                    continue
-                records = allocation.get("terminal_evidence", [])
-                if not records or not all(
-                    owned_record(r, allocation) and terminal_state(r["state"]) in TERMINAL for r in records
-                ):
-                    continue
-                if any(terminal_state(r["state"]) == "CANCELLED" for r in records):
-                    continue
-                terminal_states = {terminal_state(r["state"]) for r in records}
-                reason = (
-                    "host_oom"
-                    if "OUT_OF_MEMORY" in terminal_states
-                    else "timeout"
-                    if "TIMEOUT" in terminal_states
-                    else "preempted"
-                    if "PREEMPTED" in terminal_states
-                    else "worker_lost"
-                )
-                if reason not in task.retry.reasons:
-                    continue
-                proof_path = store.root / "recovery" / f"{attempt['attempt_id']}-{tid}.json"
-                atomic_json(
-                    proof_path,
-                    {
-                        "schema_version": 1,
-                        "quiescent": True,
-                        "previous_epoch": old_epoch,
-                        "attempt_id": attempt["attempt_id"],
-                        "campaign_id": cid,
-                        "task_id": tid,
-                        "allocation_token": allocation["token"],
-                        "terminal_evidence": records,
-                        "verified_at": now(),
-                        "basis": "exact owned allocation absent from live query and positively terminal in accounting",
-                    },
-                )
             try:
                 authorize_retry(store, cid, tid, terminal_evidence=proof_path)
             except ValueError as exc:
+                if proof_path is not None and ("attempt limit exhausted" in str(exc) or "memory escalation exhausted" in str(exc)):
+                    import hashlib
+                    store.update_task_state(cid, tid, {"state": "failed", "after_attempt_id": attempt["attempt_id"],
+                        "reason": "retry_exhausted", "terminal_retry_failure": {
+                            "attempt_id": attempt["attempt_id"], "evidence_path": str(proof_path),
+                            "evidence_sha256": hashlib.sha256(proof_path.read_bytes()).hexdigest(), "detail": str(exc)}})
                 decisions.append({"task_id": tid, "decision": "retry_blocked", "reason": str(exc)})
                 continue
-            # The old HQ job may contain unrelated long-running siblings. Retire
-            # only this exact terminal attempt rather than wait for the whole job.
+            # Retire only this exact terminal occurrence; unrelated HQ siblings stay.
             for intent in intents:
-                if (
-                    intent.get("backend") == "hq"
-                    and intent.get("campaign_id") == cid
-                    and tid in intent.get("task_ids", [])
-                ):
-                    retired = set(intent.get("retired_task_ids", []))
-                    retired.add(tid)
-                    intent["retired_task_ids"] = sorted(retired)
+                if (intent.get("backend") == "hq" and intent.get("campaign_id") == cid
+                        and tid in intent.get("task_ids", [])):
+                    intent["retired_task_ids"] = sorted(set(intent.get("retired_task_ids", [])) | {tid})
                     store.put_intent(intent)
             decisions.append({"task_id": tid, "decision": "retry_authorized", "reason": reason})
     return decisions
@@ -487,7 +469,10 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
                 raise RuntimeError("Pooled reconciliation requires the supervised leadership descriptor")
             from .backends.hyperqueue import HQBackend
 
-            hq = hq or HQBackend(store.root / "service/hq", config.control.hq_binary)
+            hq = hq or HQBackend(
+                store.root / "service/hq", config.control.hq_binary,
+                log_dir=log_directory(config, "hq_tasks", fallback=store.root / "service/task_logs"),
+            )
             for request_path in sorted((store.root / "requests").glob("cancel-*.json")):
                 if request_path.name.endswith(".done.json"):
                     continue
@@ -540,15 +525,27 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
                 continue
             for tid in store.task_ids(campaign["campaign_id"]):
                 state = store.task_state(campaign["campaign_id"], tid)
+                if campaign.get("pause_dispatch") and state.get("state", "ready") in (
+                    "ready", "retry_wait"
+                ):
+                    continue  # Paused, unadmitted work must not reserve new workers.
                 if state.get("state", "ready") in ("ready", "submitted", "retry_wait"):
+                    from .adaptive_recovery import effective_task
+
                     task = store.task(campaign["campaign_id"], tid)
+                    task = effective_task(store, task if isinstance(task, TaskSpec) else TaskSpec.model_validate(task))
                     ready.append(task.model_dump() if hasattr(task, "model_dump") else task)
+        from .adaptive_recovery import effective_config
+
+        base_profile_memory = {name: profile.memory_mib for name, profile in config.profiles.items()}
+        config = effective_config(store, config, ready)
         owned = [i for i in store.intents() if i.get("backend") == "worker"]
         controls_path = store.root / "controls.json"
         controls = json.loads(controls_path.read_text()) if controls_path.exists() else {}
         gated, gate_reasons = allocation_gates(
             store, config, owned, reset_after=controls.get("startup_reset_after")
         )
+        deadline = control_deadline(store, config, epoch) if ready and config.profiles else None
         plan = capacity_plan(
             config,
             ready,
@@ -561,21 +558,57 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
                 if i.get("backend") in ("worker", "direct")
                 and i.get("state") in ("intent", "unknown", "submitted", "running")
             ],
+            remaining_control_seconds=None if deadline is None else max(0, deadline - time.time()),
         )
         plan["reasons"].extend(gate_reasons + direct_gate_reasons)
         if hq_admission_blocked:
             plan["actions"] = []
             plan["reasons"].append("HQ_SUBMISSION_UNKNOWN: reconcile exact intent before new worker growth")
+            for reserve in plan.get("pending_reserves", {}).values():
+                reserve["planned"] = 0
+                reserve["reserved_after_plan"] = (
+                    reserve["observed_pending"] + reserve["uncertain_reservations"]
+                )
+                reserve["deficit_after_plan"] = max(0, reserve["target"] - reserve["reserved_after_plan"])
+                if reserve["deficit_after_plan"]:
+                    reserve["blocked_by"] = sorted(set(reserve["blocked_by"]) | {"HQ_SUBMISSION_UNKNOWN"})
         config_path = store.root / "resolved_config.json"
         atomic_json(config_path, config.model_dump())
+        task_by_id = {task["task_id"]: task for task in ready}
         for action in plan["actions"]:
             assert_epoch(store, epoch)
-            profile = config.profiles[action["profile"]]
+            if deadline is not None and not any(
+                fits_remaining_control(task_by_id[tid], config, max(0, deadline - time.time()))
+                for tid in action["covered_task_ids"]
+            ):
+                plan["reasons"].append("CONTROL_REMAINING_TOO_SHORT: stopped worker submission burst")
+                break  # A later reconciliation can still admit shorter waiting work.
+            profile = config.profiles[action["profile"]].model_copy(update={"memory_mib": max(
+                base_profile_memory[action["profile"]],
+                *(task_by_id[tid]["resources"]["memory_mib"] + config.policy.worker_overhead_mib
+                  for tid in action["covered_task_ids"]),
+            )})
+            from .worker_capacity import admission_dependencies
+
+            concurrency = admission_dependencies(config, profile, jobs, store.intents())
+            if not concurrency["allowed"]:
+                plan["reasons"].append(concurrency["reason"])
+                continue
+            from .allocation_budget import budget_admission
+
+            budget_check = budget_admission(store, config, profile)
+            plan["allocation_budget"] = budget_check
+            if not budget_check["allowed"]:
+                plan["reasons"].append(budget_check["reason"])
+                break
             token = uuid.uuid4().hex
             directory = store.root / "submissions" / token
             directory.mkdir(parents=True)
+            logs = log_directory(config, "allocations", token, fallback=directory)
             worker_config = directory / "config.json"
-            atomic_json(worker_config, config.model_dump())
+            allocation_config = config.model_copy(deep=True)
+            allocation_config.profiles[action["profile"]] = profile
+            atomic_json(worker_config, allocation_config.model_dump())
             script = directory / "worker.sh"
             argv = [
                 sys.executable,
@@ -599,10 +632,10 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
             )
             extra = resource_args(profile) + [
                 "--output",
-                str(directory / "slurm.out"),
+                str(logs / "slurm.out"),
                 "--error",
-                str(directory / "slurm.err"),
-            ]
+                str(logs / "slurm.err"),
+            ] + concurrency["extra_args"]
             intent = {
                 "token": token,
                 "backend": "worker",
@@ -616,6 +649,7 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
                 "extra_args": extra,
                 "job_name": f"hhq-{token[:16]}",
                 "reason": action["reason"],
+                "concurrency_admission": concurrency,
             }
             store.put_intent(intent)
             assert_epoch(store, epoch)
@@ -638,6 +672,30 @@ def tick(config: Config, *, epoch=None, slurm=None, hq=None):
             "plan": plan,
             "retry_decisions": retry_decisions,
         }
+        from .planner import ACTIVE_INTENT_STATES, _positive_worker_job
+
+        status["worker_capacity"] = []
+        for allocation in owned:
+            if allocation.get("state") not in ACTIVE_INTENT_STATES:
+                continue
+            matches = [mapping(job) for job in jobs if _positive_worker_job(mapping(job), allocation)]
+            states = {row.get("state") for row in matches}
+            status["worker_capacity"].append({
+                "token": allocation["token"], "profile": allocation["profile"],
+                "dispatch_profile": allocation.get("dispatch_profile", allocation["profile"]),
+                "state": next(iter(states)) if len(states) == 1 else "UNKNOWN",
+            })
+        from .service.completion import reconcile_completion, reconcile_pending_drain
+
+        status["completion"] = reconcile_completion(
+            store, config, slurm, jobs, hq, epoch, retry_decisions
+        )
+        status["pending_drain"] = (
+            {"enabled": config.policy.cancel_pending_when_assigned, "covered_by_completion": True}
+            if status["completion"].get("hq_settled") else reconcile_pending_drain(
+                store, config, slurm, jobs, hq, epoch, retry_decisions
+            )
+        )
         atomic_json(store.root / "controller_status.json", status)
         return status
 

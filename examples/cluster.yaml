@@ -10,8 +10,12 @@ control:
   memory_mib: 1024
   walltime_seconds: 86400
   standby_replicas: 0
+  stop_when_complete: true  # Cancel surplus pending workers, then stop the settled service.
+  auto_renew: false  # Opt in for planned Slurm renewal with standby_replicas=0.
+  renew_lead_seconds: 3600
 policy:
-  reconcile_interval_seconds: 45
+  reconcile_interval_seconds: 15
+  budget_priority: []  # Optional ordered budget names; [] retains weighted allocation.
   max_submissions_per_cycle: 2
   max_direct_submitted: 16
 budgets:
@@ -19,12 +23,14 @@ budgets:
     partitions: [cpu]
     running_target: 3
     pending_reserve: 1
+    min_pending: 0  # Opt in to a live pooled-worker floor; raise hard/profile caps too.
     max_submitted: 4
     source: explicit example operator budget
   gpu:
     partitions: [gpu]
     running_target: 1
     pending_reserve: 1
+    min_pending: 0  # Opt in to a live pooled-worker floor; raise hard/profile caps too.
     max_submitted: 2
     source: explicit example operator budget
 profiles:

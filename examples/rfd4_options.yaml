@@ -1,0 +1,41 @@
+# Copy outside this repository and fill every null before preparing a sweep.
+# Use the saved inference_sweep manifest from the scientific notebook.
+runtime:
+  argv: [/absolute/path/to/RFD4/.venv/bin/python]
+  environment: {}
+  # Optional hashes for external custom providers, checkpoints or container files.
+  source_hashes: {}
+  # For a scientific Apptainer runtime, AF3 must start on the host first:
+  # host_af3: {python: /usr/bin/python3}
+reuse_model: false
+workloads:
+  generate:
+    profile: rfd4-generate
+    runs_per_task: 1
+    max_attempts: 2
+    resources:
+      cpus: 1
+      gpus: 1
+      memory_mib: null
+      runtime_seconds: null  # Estimate for the WHOLE bundle, not each row.
+      runtime_confidence: declared
+  gradient:
+    profile: rfd4-gradient
+    runs_per_task: 1
+    max_attempts: 2
+    resources:
+      cpus: 1
+      gpus: 1
+      memory_mib: null
+      runtime_seconds: null
+      runtime_confidence: declared
+  beam:
+    profile: rfd4-beam
+    runs_per_task: 1
+    max_attempts: 2
+    resources:
+      cpus: 1
+      gpus: 1
+      memory_mib: null
+      runtime_seconds: null
+      runtime_confidence: declared

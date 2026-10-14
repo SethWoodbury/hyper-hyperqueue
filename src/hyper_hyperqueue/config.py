@@ -28,6 +28,8 @@ def load_config(path: str | Path | None = None, *, overrides: dict | None = None
     merge(data, overrides or {})
     config = Config.model_validate(data)
     config.state_dir = str(Path(config.state_dir).expanduser().absolute())
+    if config.log_dir is not None:
+        config.log_dir = str(Path(config.log_dir).expanduser().absolute())
     for name, profile in config.profiles.items():
         if profile.budget and profile.budget not in config.budgets:
             raise ValueError(f"Profile {name}: unknown budget {profile.budget}")

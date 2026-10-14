@@ -14,6 +14,13 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from .adaptive_recovery import (
+    classify_memory_failure,
+    effective_task,
+    prepare_resource_override,
+    verified_scheduler_proof,
+)
+from .logs import log_directory
 from .models import TaskSpec
 from .state import StateStore, atomic_json, ensure_directory, file_lock, fingerprint, read_json, utc_now
 from .telemetry import ProcessSampler, ResourceMismatch, allocation_context, assigned_gpu_context
@@ -139,9 +146,10 @@ def _validate(task: TaskSpec, attempt_dir: Path, env: dict[str, str]) -> dict:
     if any(not item["valid"] for item in checks):
         return {"valid": False, "kind": "expected_paths", "paths": checks}
     if task.output.validator_argv:
+        logs = Path(env.get("HHQ_TASK_LOG_DIR", str(attempt_dir)))
         with (
-            (attempt_dir / "validator.stdout").open("wb") as out,
-            (attempt_dir / "validator.stderr").open("wb") as err,
+            (logs / "validator.stdout").open("wb") as out,
+            (logs / "validator.stderr").open("wb") as err,
         ):
             result = _execute(
                 task.output.validator_argv,
@@ -299,13 +307,17 @@ def authorize_retry(
         task = store.task(campaign_id, task_id)
         state = store.task_state(campaign_id, task_id)
         attempts = store.attempts(campaign_id, task_id)
+        if state.get("reason") == "exported_to_new_generation":
+            raise ValueError("Task was retired into a recovery export; retry the new generation only")
         internal = (
             internal_fencing_evidence(store, task, attempts[-1], terminal_evidence)
             if terminal_evidence is not None and attempts
             else None
         )
+        scheduler = (verified_scheduler_proof(store, task, attempts[-1], terminal_evidence)
+                     if terminal_evidence is not None and attempts else None)
         if state["state"] in {"succeeded", "running", "submitted", "ready"} or (
-            state["state"] == "canceled" and not internal
+            state["state"] == "canceled" and not (internal or scheduler)
         ):
             raise ValueError(f"Task is not retryable: {state['state']}")
         if len(attempts) >= task.retry.max_attempts:
@@ -339,12 +351,12 @@ def authorize_retry(
             "retry_authorized": True,
             "manual_retry": manual,
         }
-        if "result" not in latest or internal:
+        if "result" not in latest or internal or scheduler:
             if terminal_evidence is None:
                 raise ValueError("Missing final result requires terminal/fencing evidence")
             path = Path(terminal_evidence).resolve()
             data = path.read_bytes()
-            proof = internal or __import__("json").loads(data)
+            proof = internal or scheduler or __import__("json").loads(data)
             epoch = attempt_epoch(latest)
             if proof.get("quiescent") is not True or str(proof.get("previous_epoch")) != str(epoch):
                 raise ValueError("Fencing proof does not bind this attempt epoch")
@@ -366,6 +378,10 @@ def authorize_retry(
                     fencing_intent_path=internal["fencing_intent_path"],
                     fencing_intent_sha256=internal["fencing_intent_sha256"],
                 )
+            if scheduler:
+                if scheduler["reason"] not in task.retry.reasons and not manual:
+                    raise ValueError("Scheduler termination reason is not allowed by retry policy")
+                update["recovery_proof"].update(kind="scheduler_termination", reason=scheduler["reason"])
             if not _recovery_allows(task, latest, update):
                 raise ValueError("Output policy prohibits ambiguous replay")
         else:
@@ -377,6 +393,11 @@ def authorize_retry(
                 or not (task.output.repeatable or task.output.mode == "isolated")
             ):
                 raise ValueError("Failure reason/output policy does not allow automatic retry")
+        reason = (scheduler["reason"] if scheduler else "worker_lost" if internal
+                  else latest.get("result", {}).get("reason"))
+        override = prepare_resource_override(store, task, latest, reason)
+        if override:
+            update["resource_override"] = override
         return store.update_task_state(campaign_id, task_id, update)
 
 
@@ -437,7 +458,7 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                     )
                     internal_retry = coordinator.get("recovery_proof", {}).get(
                         "kind"
-                    ) == "generation_recovery" and _recovery_allows(task, previous, coordinator)
+                    ) in {"generation_recovery", "scheduler_termination"} and _recovery_allows(task, previous, coordinator)
                     if (result["status"] == "canceled" and not internal_retry) or (
                         not manually_authorized
                         and not internal_retry
@@ -449,6 +470,12 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                         return 75
             if len(attempts) >= task.retry.max_attempts:
                 return 75
+            if (attempts and task.retry.oom_memory_multipliers
+                    and attempts[-1].get("result", {}).get("reason") == "host_oom"
+                    and not (coordinator.get("retry_authorized")
+                             and coordinator.get("after_attempt_id") == attempts[-1]["attempt_id"])):
+                return 75  # Only the retry owner may choose an escalated attempt envelope.
+            task = effective_task(store, task)
             with contextlib.ExitStack() as locks:
                 collision = task.output.collision_key
                 if collision:
@@ -465,8 +492,12 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                 attempt_dir = directory / "attempts" / task_id / attempt_id
                 ensure_directory(attempt_dir)
                 (attempt_dir / "output").mkdir(mode=0o700)
+                logs = log_directory(
+                    store.campaign(campaign_id).get("resolved_config", {}),
+                    "campaigns", campaign_id, task_id, attempt_id, fallback=attempt_dir,
+                )
                 for stream in ("stdout", "stderr"):
-                    (attempt_dir / stream).touch(mode=0o600)
+                    (logs / stream).touch(mode=0o600)
                 attempt = {
                     "schema_version": 1,
                     "attempt_id": attempt_id,
@@ -475,10 +506,13 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                     "campaign_id": campaign_id,
                     "task_fingerprint": task_fp,
                     "attempt_dir": str(attempt_dir),
+                    "log_dir": str(logs),
                     "started_at": utc_now(),
                     "runner_pid": os.getpid(),
                     "context": allocation_context(),
                     "argv": task_argv(task),
+                    "resources": task.resources.model_dump(),
+                    "resource_override": coordinator.get("resource_override"),
                 }
                 atomic_json(attempt_dir / "attempt.json", attempt)
                 env = {
@@ -489,6 +523,7 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                     "HHQ_ATTEMPT_ID": attempt_id,
                     "HHQ_ATTEMPT_DIR": str(attempt_dir),
                     "HHQ_TASK_OUTPUT_DIR": str(attempt_dir / "output"),
+                    "HHQ_TASK_LOG_DIR": str(logs),
                 }
                 for variable in (
                     "OMP_NUM_THREADS",
@@ -527,8 +562,8 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                             raise ResourceMismatch(f"Task environment cannot replace provenance {variable}")
                     result["assigned_gpu"] = assigned_gpu_context(task.resources)
                     with (
-                        (attempt_dir / "stdout").open("wb") as out,
-                        (attempt_dir / "stderr").open("wb") as err,
+                        (logs / "stdout").open("wb") as out,
+                        (logs / "stderr").open("wb") as err,
                     ):
                         execution = _execute(
                             task_argv(task),
@@ -551,13 +586,16 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                             exit_code=128 + signum,
                         )
                     elif execution["timed_out"]:
-                        result.update(status="failed", reason="timeout", exit_code=124)
+                        result.update(status="failed", reason="timeout", timeout_scope="task", exit_code=124)
                     elif execution["returncode"] != 0:
                         rc = execution["returncode"]
                         result.update(
                             reason="application_signal" if rc < 0 else "application_exit",
                             exit_code=(128 - rc) if rc < 0 else rc,
                         )
+                        memory_reason = classify_memory_failure(logs / "stderr")
+                        if memory_reason:
+                            result["reason"] = memory_reason
                     else:
                         validation = _validate(task, attempt_dir, env)
                         result["validation"] = validation

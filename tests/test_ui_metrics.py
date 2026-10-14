@@ -48,14 +48,18 @@ def test_dashboard_rejects_cross_site_reads_and_mutations(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
+    auth = {"Authorization": f"Bearer {server.session_token}"}
     try:
-        with urlopen(base + "/api/status", timeout=5) as response:
+        with pytest.raises(HTTPError) as error:
+            urlopen(base + "/api/status", timeout=5)
+        assert error.value.code == 401
+        with urlopen(Request(base + "/api/status", headers=auth), timeout=5) as response:
             assert json.load(response)["campaigns"][0]["tasks"] == 2
         with pytest.raises(HTTPError) as error:
-            urlopen(Request(base, headers={"Host": "untrusted.example"}), timeout=5)
+            urlopen(Request(base, headers={"Host": "untrusted.example", **auth}), timeout=5)
         assert error.value.code == 403
         with pytest.raises(HTTPError) as error:
-            urlopen(Request(base + "/action", data=b"action=submit&csrf=wrong"), timeout=5)
+            urlopen(Request(base + "/action", data=b"action=submit&csrf=wrong", headers=auth), timeout=5)
         assert error.value.code == 403
     finally:
         server.shutdown()
