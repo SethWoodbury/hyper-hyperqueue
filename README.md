@@ -147,6 +147,7 @@ The dashboard (`hhq ui`) is optional and read-only by default. It binds only to 
 - [Cluster discovery](docs/cluster-discovery.md)
 - [RFD4 adapter](docs/rfd4.md), [marimo example](examples/rfd4_notebook.py), [options template](examples/rfd4_options.yaml)
 - [Native RFD4 comparison and remaining differences](docs/native-rfd4-comparison.md)
+- [Measured RFD4 resources and recipe timings](docs/rfd4-measured-resources.md): dated calibration, integral RAM requests and four-hour bundle planning
 - [Example site limits and billing interpretation](docs/site-example-digs.md)
 - [Validation evidence](docs/validation.md): real integration results, kept separate from unit tests
 - [Design decisions](docs/decisions/)

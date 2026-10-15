@@ -1,0 +1,87 @@
+gpu,method,thinking,af3_schedule,beam_width,branches,gradient_modality,gradient_strength,completed_rows,first_rows,first_median_seconds,first_p90_seconds,later_rows,later_median_seconds,later_p90_seconds
+NVIDIA A100-SXM4-80GB,beam,high,early,2,4,,,6,1,546.9,546.9,5,428.1,499.7
+NVIDIA A100-SXM4-80GB,beam,high,early,4,2,,,9,2,596.8,678.3,7,361.1,433.4
+NVIDIA A100-SXM4-80GB,beam,high,early,4,4,,,12,2,750.9,889.8,10,810.5,1028.7
+NVIDIA A100-SXM4-80GB,beam,high,late,2,4,,,6,1,312.1,312.1,5,218.6,327.3
+NVIDIA A100-SXM4-80GB,beam,high,late,4,2,,,11,2,335.5,391.1,9,270.5,486.7
+NVIDIA A100-SXM4-80GB,beam,high,late,4,4,,,6,1,838.2,838.2,5,557.3,672.5
+NVIDIA A100-SXM4-80GB,beam,medium,late,2,2,,,22,4,168.4,174.4,18,98.4,149.3
+NVIDIA A100-SXM4-80GB,gradient,high,n/a,,,both,1em05,30,2,130.1,146.2,28,31.5,51.9
+NVIDIA A100-SXM4-80GB,gradient,medium,n/a,,,backbone,1em05,20,1,86.1,86.1,19,23.2,69.1
+NVIDIA L40,beam,high,late,2,2,,,6,1,280.4,280.4,5,180.2,231.0
+NVIDIA L40,beam,high,late,4,2,,,12,2,583.3,635.6,10,354.9,452.6
+NVIDIA L40,beam,medium,early,4,2,,,6,1,646.0,646.0,5,393.3,496.5
+NVIDIA L40,beam,medium,late,2,4,,,6,1,368.1,368.1,5,250.3,429.2
+NVIDIA L40,gradient,medium,n/a,,,backbone,1em05,10,1,244.1,244.1,9,40.4,66.9
+NVIDIA L40S,beam,high,early,2,4,,,12,2,378.9,418.3,10,426.7,594.7
+NVIDIA L40S,beam,high,early,4,2,,,6,1,449.2,449.2,5,375.0,428.8
+NVIDIA L40S,beam,high,late,2,2,,,6,1,197.0,197.0,5,122.9,154.9
+NVIDIA L40S,beam,high,late,2,4,,,6,1,382.9,382.9,5,214.1,352.1
+NVIDIA L40S,beam,high,late,4,4,,,6,1,556.9,556.9,5,442.2,577.2
+NVIDIA L40S,beam,medium,early,4,2,,,12,2,358.2,369.0,10,355.2,430.7
+NVIDIA L40S,beam,medium,early,4,4,,,18,3,622.3,746.8,15,639.3,798.1
+NVIDIA L40S,beam,medium,late,4,4,,,6,1,328.3,328.3,5,368.9,651.3
+NVIDIA L40S,gradient,high,n/a,,,backbone,1em05,30,2,106.5,122.3,28,34.4,50.7
+NVIDIA L40S,gradient,medium,n/a,,,backbone,0p0001,30,2,117.7,122.8,28,24.1,35.8
+NVIDIA RTX 4000 Ada Generation,beam,high,late,2,2,,,6,1,525.8,525.8,5,303.9,422.2
+NVIDIA RTX 4000 Ada Generation,beam,high,late,2,4,,,6,1,826.9,826.9,5,585.5,706.1
+NVIDIA RTX 4000 Ada Generation,beam,high,late,4,2,,,6,1,742.8,742.8,5,685.4,848.9
+NVIDIA RTX 4000 Ada Generation,beam,medium,early,4,4,,,12,2,1730.0,1979.0,10,1511.0,1973.9
+NVIDIA RTX 4000 Ada Generation,beam,medium,late,2,2,,,6,1,431.8,431.8,5,237.2,342.1
+NVIDIA RTX 4000 Ada Generation,beam,medium,late,4,2,,,6,1,537.2,537.2,5,562.7,644.5
+NVIDIA RTX 4000 Ada Generation,gradient,medium,n/a,,,both,1em05,30,2,169.5,170.2,28,55.9,90.8
+NVIDIA RTX A4000,beam,high,early,2,2,,,42,7,929.0,1026.1,35,648.3,898.1
+NVIDIA RTX A4000,beam,high,early,2,4,,,12,2,1392.7,1408.8,10,1166.9,1547.7
+NVIDIA RTX A4000,beam,high,early,4,2,,,18,3,1482.8,1946.0,15,1405.2,1635.2
+NVIDIA RTX A4000,beam,high,early,4,4,,,30,5,2356.5,3681.3,25,3000.4,3756.9
+NVIDIA RTX A4000,beam,high,late,2,2,,,12,2,706.2,726.7,10,531.4,634.0
+NVIDIA RTX A4000,beam,high,late,2,4,,,18,3,1214.8,1421.4,15,849.7,1202.4
+NVIDIA RTX A4000,beam,high,late,4,2,,,6,1,1402.1,1402.1,5,1276.1,1484.4
+NVIDIA RTX A4000,beam,high,late,4,4,,,16,3,1400.1,2428.7,13,1606.1,2340.5
+NVIDIA RTX A4000,beam,medium,early,2,2,,,18,3,510.4,671.4,15,486.8,675.1
+NVIDIA RTX A4000,beam,medium,early,2,4,,,30,5,1027.2,1355.8,25,1018.3,1310.5
+NVIDIA RTX A4000,beam,medium,early,4,2,,,24,4,1290.9,1618.1,20,935.9,1129.0
+NVIDIA RTX A4000,beam,medium,early,4,4,,,12,2,2756.9,3139.8,10,2191.0,2596.2
+NVIDIA RTX A4000,beam,medium,late,2,2,,,12,2,481.9,508.3,10,316.5,377.8
+NVIDIA RTX A4000,beam,medium,late,2,4,,,25,5,740.2,1083.8,20,750.3,942.8
+NVIDIA RTX A4000,beam,medium,late,4,2,,,24,4,769.6,948.3,20,682.1,960.8
+NVIDIA RTX A4000,beam,medium,late,4,4,,,12,2,1446.2,1656.7,10,1250.6,1702.9
+NVIDIA RTX A4000,gradient,high,n/a,,,backbone,0p0001,50,3,261.3,344.5,47,105.8,167.0
+NVIDIA RTX A4000,gradient,high,n/a,,,both,0p0001,50,3,264.7,274.2,47,111.7,156.1
+NVIDIA RTX A4000,gradient,medium,n/a,,,backbone,1em05,30,2,255.1,300.9,28,94.5,125.4
+NVIDIA RTX A4000,gradient,medium,n/a,,,both,0p0001,30,2,222.1,248.0,28,85.8,121.2
+NVIDIA RTX A4000,gradient,medium,n/a,,,both,1em05,10,1,262.7,262.7,9,66.8,161.5
+NVIDIA RTX A5000,beam,medium,late,4,4,,,6,1,1349.5,1349.5,5,793.3,1552.0
+NVIDIA RTX A6000,beam,high,early,2,2,,,12,2,584.1,608.5,10,340.1,636.4
+NVIDIA RTX A6000,beam,high,early,2,4,,,24,4,980.9,1134.9,20,808.8,956.3
+NVIDIA RTX A6000,beam,high,early,4,2,,,18,3,901.3,908.9,15,731.2,1025.2
+NVIDIA RTX A6000,beam,high,early,4,4,,,18,3,1627.8,2067.0,15,1308.1,2235.2
+NVIDIA RTX A6000,beam,high,late,2,2,,,12,2,383.6,426.2,10,273.2,394.2
+NVIDIA RTX A6000,beam,high,late,2,4,,,18,3,701.6,731.7,15,469.0,792.2
+NVIDIA RTX A6000,beam,high,late,4,2,,,12,2,579.1,650.0,10,562.5,647.5
+NVIDIA RTX A6000,beam,high,late,4,4,,,18,3,844.6,1766.4,15,1071.8,1518.5
+NVIDIA RTX A6000,beam,medium,early,2,2,,,18,3,459.3,502.4,15,312.2,400.3
+NVIDIA RTX A6000,beam,medium,early,2,4,,,30,5,679.1,912.8,25,595.4,817.6
+NVIDIA RTX A6000,beam,medium,early,4,2,,,18,3,603.1,789.7,15,490.0,772.6
+NVIDIA RTX A6000,beam,medium,early,4,4,,,12,2,1291.6,1411.4,10,1286.5,1733.8
+NVIDIA RTX A6000,beam,medium,late,2,2,,,18,3,314.3,401.6,15,173.7,304.5
+NVIDIA RTX A6000,beam,medium,late,2,4,,,12,2,518.8,698.6,10,359.9,508.4
+NVIDIA RTX A6000,beam,medium,late,4,2,,,18,3,524.1,796.6,15,369.6,571.9
+NVIDIA RTX A6000,beam,medium,late,4,4,,,6,1,810.5,810.5,5,673.5,719.7
+NVIDIA RTX A6000,gradient,high,n/a,,,backbone,1em05,30,2,232.8,272.2,28,61.8,94.5
+NVIDIA RTX A6000,gradient,high,n/a,,,both,1em05,30,2,175.1,193.4,28,59.0,84.8
+NVIDIA RTX A6000,gradient,medium,n/a,,,backbone,0p0001,30,2,199.6,206.6,28,48.9,70.4
+NVIDIA RTX A6000,gradient,medium,n/a,,,both,0p0001,30,2,134.3,148.4,28,47.5,62.4
+NVIDIA RTX PRO 4000 Blackwell,beam,high,early,2,4,,,6,1,830.6,830.6,5,557.8,713.0
+NVIDIA RTX PRO 4000 Blackwell,beam,high,early,4,2,,,6,1,680.6,680.6,5,759.5,1011.9
+NVIDIA RTX PRO 4000 Blackwell,beam,high,late,2,2,,,12,2,374.0,427.7,10,231.7,298.8
+NVIDIA RTX PRO 4000 Blackwell,beam,high,late,2,4,,,6,1,444.2,444.2,5,437.0,540.6
+NVIDIA RTX PRO 4000 Blackwell,beam,high,late,4,2,,,12,2,567.6,620.7,10,483.5,562.7
+NVIDIA RTX PRO 4000 Blackwell,beam,high,late,4,4,,,12,2,1242.6,1430.0,10,921.8,1191.1
+NVIDIA RTX PRO 4000 Blackwell,beam,medium,early,2,2,,,24,4,433.0,531.7,20,253.8,323.9
+NVIDIA RTX PRO 4000 Blackwell,beam,medium,early,4,4,,,6,1,1226.8,1226.8,5,1315.4,1972.8
+NVIDIA RTX PRO 4000 Blackwell,beam,medium,late,4,2,,,12,2,527.9,576.9,10,369.2,408.2
+NVIDIA RTX PRO 4000 Blackwell,beam,medium,late,4,4,,,24,4,949.4,1130.6,20,792.8,1171.2
+NVIDIA RTX PRO 4000 Blackwell,gradient,high,n/a,,,backbone,0p0001,10,1,201.1,201.1,9,63.7,98.5
+NVIDIA RTX PRO 4000 Blackwell,gradient,high,n/a,,,both,0p0001,10,1,144.8,144.8,9,59.9,97.6
+NVIDIA RTX PRO 4000 Blackwell,gradient,medium,n/a,,,both,1em05,20,1,186.5,186.5,19,40.5,58.2

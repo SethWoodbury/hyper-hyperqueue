@@ -68,6 +68,15 @@ row input/config/seed/output mapping; do not silently introduce scientific setti
 Preparation never admits READY tasks. Disable native Lightning Slurm requeue: HHQ
 owns retries. Hash pins require stable source or a dedicated frozen checkout.
 
+Use docs/rfd4-measured-resources.md and its aggregate recipe CSV as dated
+calibration, not universal defaults. Current application follow-up uses integral
+22 GiB TOTAL allocations for gradient/beam, with worker reserve inside. Future
+application bundles target about 240 minutes using explicit recipe/device costs;
+the older two-hour preference is historical. Generic memory stays MiB and generic
+hardware profiles stay neutral. RFD4 method profiles apply the site-specific
+modern-GPU compatibility guard unless explicitly overridden. Do not infer
+AF3-only Titan failure from the demonstrated RFD4 attention incompatibility.
+
 Native model caching is not proof of continuous GPU residency or exact RNG parity.
 Qualify warm/cold behavior and actual AF3 inference. Completed row receipts require
 artifact validation. Preserve unfinished row evidence before restarting that row.

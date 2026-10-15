@@ -1,12 +1,40 @@
 # Validation record — 2026-10-12
 
+## Current measured status — October 14 follow-up
+
+The entries below are dated history, not one current qualification claim.
+Subsequent real RFD4+AF3 controls and a heterogeneous pooled/static-array comparison
+completed scientific rows with validated mapping and persistent per-bundle AF3
+workers. Real startup probes rejected unhealthy allocations before dispatch;
+positive Slurm preemption evidence triggered unfinished-work recovery. Surplus
+owned pending workers were canceled and the finite-batch CPU service stopped.
+The source/retry fixes through that comparison passed 613 tests and Ruff.
+
+The [measured resource reference](rfd4-measured-resources.md) summarizes 1,405
+completed rows with successful-attempt GPU identities and gives recipe/thinking
+details. Observed whole-job maxima reached 19.54 GiB for gradient and 19.25 GiB
+for beam; current bounded controls request **22 GiB total**, including the worker
+reserve. The earlier 20.25/19.25 GiB requests and small-control measurements below
+remain historical evidence. Whole-job cgroup peaks are not summed process RSS.
+
+Current application planning targets approximately **240-minute warm bundles**
+from explicit recipe/device estimates, with cleanup and uncertainty margins.
+This supersedes the earlier two-hour preference; it is not a measured constant,
+generic HHQ default, or permission to change published tasks. A same-declared-seed
+follow-up produced different sequences/admissions, so equal-work speed parity is
+not established. Exact RNG equivalence, a real 24-hour planned service renewal,
+specialized multi-GPU/AF2 execution and unobserved GPU models remain unqualified.
+The separate AF3-only Titan test is pending; the earlier Titan failure was RFD4
+attention, not evidence about every other application.
+
 ## October 14 — application startup and scientific controls
 
 The merged application-startup probe passed the full **587-test suite in 45.02
 seconds** and Ruff. An actual local HQ test showed a failed probe registering
 zero workers and consuming zero task attempts; a healthy replacement then ran
-the waiting command exactly once. The new probe has not yet been exercised in
-a Slurm allocation. It is optional, bounded and runs before HQ registration.
+the waiting command exactly once. At this entry's timestamp the new probe had not
+yet run in a Slurm allocation; the later comparison above exercised that path.
+It is optional, bounded and runs before HQ registration.
 
 Repaired scientific controls completed six gradient roots and four warm beam
 roots across Glu/Asp inputs, plus a separate two-root stock-inference beam
@@ -19,9 +47,9 @@ Measured whole-job memory peaks were 17.24 GiB for gradient and 16.00 GiB for
 warm beam; the stock-inference control reached 16.12 GiB. Summed process RSS
 double-counts shared pages and was higher than cgroup memory on the beam run.
 Use measured cgroup memory for allocation sizing and report assigned-GPU VRAM
-separately. The forthcoming comparison uses 20/19 GiB task RAM respectively,
-plus worker overhead. Large bundles may still exceed these small-control peaks;
-bounded OOM recovery remains enabled.
+separately. The then-forthcoming comparison used 20/19 GiB task RAM respectively,
+plus worker overhead. Its later peaks exceeded these small-control measurements;
+see the current status and resource reference above.
 
 ## October 14 — planned renewal and rapid multi-partition refill
 
@@ -107,7 +135,7 @@ The final integrated run passed **207 tests in 38.26 seconds, with no skips**. T
 
 A CPU-only `--check` probe used the **actual** RFD4 checkout and its selected `.venv`. It failed during native import with `ModuleNotFoundError: peft`. Read-only inspection found other declared dependencies absent and a Torch version different from the checkout's requirement. The selected runtime is stale/incomplete; it was not repaired or silently substituted. The failure and command remain in scratch evidence. No model weights, generation, Trainer, scientific output directory or Slurm allocation were created. The small resource values in this preflight fixture are placeholders and are **not** RFD4 measurements.
 
-Therefore, actual RFD4 native composition/execution, RFD4/AF3 GPU and container behavior, model reuse parity, throughput and memory remain unqualified. The earlier generic synthetic L40 test does not qualify them. Use a complete declared native runtime for the next CPU preflight and bounded GPU qualification before a scientific rollout.
+At that implementation stage, actual RFD4 native composition/execution, RFD4/AF3 GPU and container behavior, model reuse parity, throughput and memory remained unqualified. Later scientific controls and measurements are recorded above. The earlier generic synthetic L40 test alone did not qualify them.
 
 A follow-up source audit distinguished declared Slurm resources, native Lightning requeue, completed-output reuse and explicit beam continuation; the findings are in the RFD4 guide. Small code cleanup removed duplicate full-source verification on launch, centralized the unchanged campaign-ID formula, and deleted an unused retry-policy helper. The active retry authority and recovery semantics were preserved. The subsequent full suite passed **210 tests in 39.25 seconds, with no skips**; lint, formatting, builds, documentation links and package privacy checks passed. This audit did not run native inference or a new cluster recovery experiment. Generated marimo session metadata was archived to scratch and is now ignored by Git.
 

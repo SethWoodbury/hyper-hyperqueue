@@ -55,6 +55,20 @@ In an existing live notebook, its agent should adapt these cells rather than ove
 
 Use separate `generate`, `gradient` and `beam` workload requests. Each task requests one GPU, one node and one rank. Choose broad **qualified** GPU placements, rather than inspecting which nodes happen to be idle. `gpu-small`, `gpu-large`, `gpu-backfill` and `gpu-train` are configured profile names, not universally portable Slurm partitions.
 
+The [measured resource reference](rfd4-measured-resources.md) reports per-GPU and
+recipe/thinking timings, first/later rows and whole-job memory from real
+RFD4+AF3 work. Its current bounded follow-up uses 22 GiB **total** per allocation,
+including the worker reserve, for gradient and beam. This is workload-specific
+calibration, not a generic default or a measurement for vanilla generation.
+
+`method_profiles(..., compatibility_constraint="auto")` applies the qualified
+`Ampere|Lovelace|Hopper|Blackwell` guard on the inspected DIGS site, combined with
+any existing profile constraint. Explicit `None` disables that application guard;
+a string supplies another application guard. Other sites retain their configured
+constraints under `auto`. Generic HHQ profiles remain hardware-neutral. An opt-out
+does not qualify unsupported kernels: Titan RTX failed the inspected RFD4
+attention path; AF3-only compatibility is a separate test.
+
 ```python
 from hyper_hyperqueue.config import load_config, save_config
 from hyper_hyperqueue.integrations.rfd4 import prepare, submission
@@ -111,6 +125,32 @@ pause of an existing service.
 | Profile `allocation_seconds` | Slurm worker walltime. Typically retain 8-hour workers, with longer train workers where intended and within the control lifetime. |
 | `runs_per_task` | Number of unchanged scientific rows run sequentially in one task. Start at 1; increase after measuring startup cost and recovery granularity. |
 | `max_attempts` | Total attempts, including the first. Defaults to 1. Setting 2 permits one qualifying recovery; it does not retry every scientific error. |
+
+An optional per-workload `packing` block chooses a recipe-specific row count from
+an explicit timing estimate. It requires `group_by_recipe=True`:
+
+```python
+workloads["beam"]["packing"] = {
+    "target_seconds": 240 * 60,   # Soft four-hour bundle target.
+    "fit_seconds": 235 * 60,      # Runtime admission estimate; leave cleanup room.
+    "startup_seconds": 120,       # Replace from compatible cold-start measurements.
+    "safety_factor": 1.1,
+    "seconds_per_row": 1800,      # Example fallback assumption, not a measured default.
+    "seconds_per_row_by_recipe": {recipe_id: measured_seconds_per_row},
+}
+```
+
+The row cap is `floor((fit_seconds - startup_seconds) /
+(seconds_per_row * safety_factor))`, also bounded by `runs_per_task`. The plan
+reports the resulting estimate separately from the target and fit allowance.
+Task `resources.runtime_seconds` remains `fit_seconds`, including shorter tails;
+it is a fit check, not a kill deadline. Use costs matching GPU class, input length,
+replicates, thinking and AF3 admission. If routes are heterogeneous, use a
+conservative qualified-device estimate or prepare explicitly routed workloads.
+This is transparent packing from supplied estimates, not automatic cross-GPU
+learning. A 235-minute fit can permit two bundles in an eight-hour worker or three
+in twelve hours, but startup, cleanup and estimation error can reduce that count.
+Changing packing affects future preparations only; never rewrite active bundles.
 
 Workers pull the next compatible task until their remaining lifetime is insufficient. A faster GPU naturally finishes more tasks during the same allocation; no fixed command count or node-free-time forecast is required. Task estimates and profile weights still affect allocation planning. Automatic cross-GPU timing adaptation is not implemented. Optional `retry.oom_memory_multipliers` enables bounded host-RAM increases after a positively identified host OOM; CUDA OOM does not trigger host-RAM escalation. Empty multipliers preserve fixed-RAM behavior. Inspect HHQ measurements and update **future** plans explicitly; never relabel guesses as measurements. Use budget `min_pending` to replenish a real pending reserve (for example 8 on `gpu`, 3 on `gpu-bf`, and 1 on opt-in `gpu-train`). Set profile `max_workers` and hard budget `max_submitted` high enough for both running and pending workers. Floors apply only to enabled compatible routes, share one task backlog, and taper near completion; they cannot override hard limits. `pending_reserve` alone is only legacy cap arithmetic. Set `policy.budget_priority: [gpu, gpu-train, gpu-bf]` to replenish regular GPU first, optional training second, and backfill last. This is submission preference, not a wait for job completion. The Pools page reports shortages and blockers. Keep completed pilot configurations frozen and use a new preparation for changed policy. For finite sweeps, enable `control.stop_when_complete`:
 after all registered method campaigns settle, HHQ cancels owned pending workers,
@@ -227,4 +267,11 @@ The core runner owns attempt/retry decisions; the RFD4 runtime owns scientific o
 
 ## Validation status
 
-See [validation](validation.md) for exact tested paths. Synthetic adapter tests exercise preparation, tampering, output collisions, coverage, interrupted continuation and imports/recovery. Generic HHQ's real synthetic GPU/Slurm validation is not RFD4/AF3 GPU validation. No scientific campaign was launched or migrated as part of implementing this adapter.
+See [validation](validation.md) for exact tested paths and dates. Synthetic adapter
+tests exercise preparation, tampering, output collisions, coverage, interrupted
+continuation and imports/recovery. Subsequent bounded scientific controls and a
+heterogeneous comparison exercised real RFD4+AF3, warm bundles, automatic
+preemption recovery and completion shutdown. The [resource reference](rfd4-measured-resources.md)
+separates those measurements from unqualified GPU models, exact RNG parity and
+multi-day service renewal. Earlier implementation-only records remain historical;
+generic CUDA tests alone do not qualify the scientific path.

@@ -9,11 +9,19 @@ speed or priority advantage has not been demonstrated.
 The large comparison uses identical scientific settings and different seeds in
 both arms: pooled HHQ workers versus static Slurm arrays rendered using native
 RFD4 submission helpers. **Both arms use the same warm scientific driver.** This
-isolates scheduling and allocation effects; it does not compare the unchanged
+holds the driver constant, but different seeds, AF3 workloads and hardware/queue
+mix still confound causal scheduling comparisons; it does not compare the unchanged
 native launcher against HHQ end to end. A separate direct-native control checks
 that distinction. Report allocation GPU-hours, wall time, GPU models and actual
 billing TRES separately. Fair-share snapshots are context, not a causal estimate
 of the effect of one campaign.
+
+The [measured reference](rfd4-measured-resources.md) includes successful-row
+timings by GPU, method and recipe/thinking, together with whole-job memory.
+Six model/recipe/input-matched beam pairs did unequal AF3 work and do not establish
+the previously observed 5–7% difference as scheduler overhead. A bounded follow-up
+with equal declared seeds also produced different sequences and admissions;
+compare realized work before describing any timing as matched inference speed.
 
 ## Features and remaining differences
 

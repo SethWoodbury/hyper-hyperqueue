@@ -16,8 +16,9 @@ allocation. A site submission plugin is present; not all policy is discoverable.
 
 An actual bounded submission exposed an additional rule: regular `gpu` rejects
 untyped `--gres=gpu:1` requests. Use `gpu:small:1` and `gpu:large:1` profiles sharing
-one regular-GPU budget to cover both currently advertised classes, without a GPU
-model constraint. Inventory alone did not reveal this rule. On the same date,
+one regular-GPU budget to cover both currently advertised classes. Generic HHQ
+need not constrain GPU models; the RFD4 application guard is described below.
+Inventory alone did not reveal this rule. On the same date,
 `sbatch --test-only` accepted generic `gpu:1` for `gpu-bf` (five hours) and
 `gpu-train` (twelve hours); these checks allocated no GPUs. A successful planning
 check is not model/kernel compatibility qualification on every physical GPU.
@@ -30,6 +31,10 @@ both backends' routes, covering the site's currently observed newer generations.
 This is an application compatibility constraint, not a generic HHQ restriction.
 Titan nodes can belong to regular `gpu` as well as backfill; selecting `small`
 alone does not guarantee this workload's hardware compatibility.
+RFD4 `method_profiles` applies this guard by default on DIGS; explicit overrides
+remain available. A separate AF3-only Titan test is pending. Do not infer its
+outcome from the RFD4 kernel failure. The [measured resource reference](rfd4-measured-resources.md)
+lists working observed models, timing samples and current integral RAM requests.
 
 The application's two-running/one-pending training setting is intentionally lower
 than the site limit. A running target is not a Slurm hard throttle: pending jobs
