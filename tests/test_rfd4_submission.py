@@ -661,3 +661,27 @@ def test_rfd4_rejects_invalid_compatibility_override(config, constraint):
     request = Resources(gpus=1, memory_mib=2048, runtime_seconds=60, runtime_confidence="declared")
     with pytest.raises(ValueError, match="compatibility_constraint"):
         rfd4.method_profiles(config, {"gradient": request}, ["gpu"], compatibility_constraint=constraint)
+
+
+@pytest.mark.parametrize("late_constraint", [None, "TitanRTX", "UW&(A4000|TitanRTX)"])
+def test_final_rfd4_guard_cannot_be_removed_by_late_profile_override(config, late_constraint):
+    config.cluster = "digs"
+    request = Resources(gpus=1, memory_mib=2048, runtime_seconds=60, runtime_confidence="declared")
+    configured = rfd4.method_profiles(config, {"beam": request}, ["gpu"])
+    configured.profiles["rfd4-beam-gpu"].constraint = late_constraint
+    before = configured.model_dump()
+    final = rfd4.apply_rfd4_gpu_constraints(configured, ["rfd4-beam-gpu"])
+    expected = (f"({late_constraint})&({rfd4.DIGS_RFD4_GPU_CONSTRAINT})" if late_constraint
+                else rfd4.DIGS_RFD4_GPU_CONSTRAINT)
+    assert final.profiles["rfd4-beam-gpu"].constraint == expected
+    assert configured.model_dump() == before
+    assert final.profiles["gpu"] == configured.profiles["gpu"]
+    assert rfd4.apply_rfd4_gpu_constraints(final, ["rfd4-beam-gpu"]).model_dump() == final.model_dump()
+    opted_out = rfd4.apply_rfd4_gpu_constraints(configured, ["rfd4-beam-gpu"], compatibility_constraint=None)
+    assert opted_out.model_dump() == before
+
+
+def test_final_rfd4_gpu_guard_refuses_generic_or_unknown_profiles(config):
+    for names in (["gpu"], ["rfd4-missing"], ["rfd4-missing", "rfd4-missing"]):
+        with pytest.raises(ValueError, match="RFD4 profile names"):
+            rfd4.apply_rfd4_gpu_constraints(config, names)

@@ -26,7 +26,29 @@ def _rfd4_constraint(existing, requested, cluster):
     guard = guard.strip()
     if not existing or existing == guard:
         return guard
+    if existing.startswith("(") and existing.endswith(f")&({guard})"):
+        return existing  # Already AND-ed by this helper; preserve exact config identity.
     return f"({existing})&({guard})"
+
+
+def apply_rfd4_gpu_constraints(
+    config: Config, profile_names, *, compatibility_constraint: str | None = "auto",
+) -> Config:
+    """Apply the application guard after all placement overrides, idempotently.
+
+    A custom constraint narrows the guard; it cannot silently replace it. Explicit
+    ``compatibility_constraint=None`` is the opt-out. Only named RFD4 profiles are
+    copied/updated; original and generic profiles are preserved.
+    """
+    names = list(profile_names)
+    if (any(not isinstance(name, str) or not name.startswith("rfd4-")
+            or name not in config.profiles for name in names) or len(names) != len(set(names))):
+        raise ValueError("profile_names must contain unique existing RFD4 profile names")
+    result = config.model_copy(deep=True)
+    for name in names:
+        profile = result.profiles[name]
+        profile.constraint = _rfd4_constraint(profile.constraint, compatibility_constraint, result.cluster)
+    return result
 
 
 def _verified(prepared, *, check_sources=True):
