@@ -32,9 +32,31 @@ This is an application compatibility constraint, not a generic HHQ restriction.
 Titan nodes can belong to regular `gpu` as well as backfill; selecting `small`
 alone does not guarantee this workload's hardware compatibility.
 RFD4 `method_profiles` applies this guard by default on DIGS; explicit overrides
-remain available. A separate AF3-only Titan test is pending. Do not infer its
-outcome from the RFD4 kernel failure. The [measured resource reference](rfd4-measured-resources.md)
+remain available. A separate real AF3-only Titan test also failed: the inspected
+AF3 runtime with default cuDNN attention requires SM80 (Ampere) or newer. It
+produced no prediction, with host/GPU memory well below their limits. This is
+independent AF3 evidence, not an inference from the RFD4 failure; alternate AF3
+attention implementations were not tested. The [measured resource reference](rfd4-measured-resources.md)
 lists working observed models, timing samples and current integral RAM requests.
+
+For standalone AF3 command files, opt into the application-specific routes:
+
+```python
+from hyper_hyperqueue.integrations.af3.submission import af3_profiles, apply_af3_gpu_constraints
+
+af3_config = af3_profiles(config, ["gpu-small", "gpu-large", "gpu-backfill"])
+# If you edit these generated profiles, reapply the guard after those edits:
+af3_config = apply_af3_gpu_constraints(af3_config, af3_config.workloads["af3"])
+# Use generic api.plan/submit(..., profile="af3", config=af3_config).
+```
+
+Choose profile names that actually exist in your configuration. The constructor
+clones their resource and placement settings into `af3-*` routes; generic routes
+stay unchanged. Fallbacks must remain inside the selected guarded AF3 routes.
+`compatibility_constraint=None` is an explicit opt-out for a separately qualified
+runtime. Other clusters retain their existing constraints under `auto`, or can
+supply their own feature expression. Shell command text never enables this guard
+automatically; these helpers do not alter AF3 parameters or submit jobs.
 
 The application's two-running/one-pending training setting is intentionally lower
 than the site limit. A running target is not a Slurm hard throttle: pending jobs

@@ -1,5 +1,17 @@
 # Validation record — 2026-10-12
 
+## Current combined regression check — October 14
+
+The merged AF3 compatibility profiles, constraint-composition fix, cached access
+CLI and dashboard session-isolation changes passed **678 tests in 48.87 seconds**;
+Ruff and diff checks passed. The external lightweight notebook bridge passed
+60 tests, including immutable standalone AF3 profile preparation. A live marimo
+CPU-only preparation confirmed guarded routes across regular small/large GPU,
+backfill and training without creating scheduler state or submitting jobs.
+This regression check did not launch new scientific or Slurm work. Four-hour
+warm-bundle memory stability and actual 24-hour controller renewal remain future
+live qualifications; unit coverage does not establish those measurements.
+
 ## Current measured status — October 14 follow-up
 
 The entries below are dated history, not one current qualification claim.
@@ -24,8 +36,36 @@ generic HHQ default, or permission to change published tasks. A same-declared-se
 follow-up produced different sequences/admissions, so equal-work speed parity is
 not established. Exact RNG equivalence, a real 24-hour planned service renewal,
 specialized multi-GPU/AF2 execution and unobserved GPU models remain unqualified.
-The separate AF3-only Titan test is pending; the earlier Titan failure was RFD4
-attention, not evidence about every other application.
+The separate AF3-only Titan test has now failed under the inspected default
+cuDNN attention protocol; its specific evidence is recorded below. Neither that
+failure nor the separate RFD4 failure establishes a general HHQ GPU restriction.
+
+## October 14 — dashboard session isolation follow-up
+
+A regression using one browser cookie jar reproduced authentication loss when two
+viewers on separate hosts used the same internal port through different local
+SSH forwards. Browser cookies are not port-scoped. Cookie names now include a
+per-launch identifier; the same two-viewer regression passes while keeping both
+sessions independent. The focused UI/security/dashboard suite passed **38 tests
+in 2.58 seconds**, and Ruff passed. This was a local HTTP test, with no Slurm or
+scientific jobs. Viewer startup also reports its actual hostname, selected state
+directory, mode, private URL and an explicit SSH-forwarding example.
+
+## October 14 — independent AF3 Titan qualification
+
+A standalone real AF3 inference probe used `af3-open-2026-08-19.sif`, default
+cuDNN attention, and a TITAN RTX (SM75). Its source pins matched. Compilation
+failed with `SDPA FP16/BF16 requires SM80 (Ampere) or newer architecture`; no CIF
+or confidence result was produced. The allocation lasted 69 seconds. Whole-job
+cgroup peak was 8.20 GiB of an 18 GiB request; sampled assigned-device usage
+peaked at 4,284 MiB of 24,022 MiB. The error and available memory distinguish
+this from host/GPU OOM or a node-startup problem.
+
+This qualifies a scoped exclusion for that AF3 runtime/attention combination,
+independently of RFD4's earlier Titan attention failure. Generic HHQ stays
+hardware-neutral. Alternate AF3 attention implementations were not tested.
+Private terminal receipts retain the exact allocation, source pins and error-log
+hash; no protein sequence, private path or device UUID is published here.
 
 ## October 14 — application startup and scientific controls
 

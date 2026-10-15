@@ -74,8 +74,9 @@ calibration, not universal defaults. Current application follow-up uses integral
 application bundles target about 240 minutes using explicit recipe/device costs;
 the older two-hour preference is historical. Generic memory stays MiB and generic
 hardware profiles stay neutral. RFD4 method profiles apply the site-specific
-modern-GPU compatibility guard unless explicitly overridden. Do not infer
-AF3-only Titan failure from the demonstrated RFD4 attention incompatibility.
+modern-GPU compatibility guard unless explicitly overridden. Separate real inference tests now reject Titan RTX for the inspected RFD4
+attention path and current AF3 cuDNN SDPA path (SM80+ required). Scope exclusions
+to those application/runtime combinations; alternate AF3 attention was not tested.
 
 Native model caching is not proof of continuous GPU residency or exact RNG parity.
 Qualify warm/cold behavior and actual AF3 inference. Completed row receipts require

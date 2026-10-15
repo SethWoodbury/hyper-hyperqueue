@@ -7,12 +7,17 @@ URL. Submission additionally needs a separate CSRF token.
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import html
 import itertools
 import json
 import os
 import re
 import secrets
+import shlex
+import socket
+import sys
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -313,8 +318,11 @@ def detail_page(route, params, config, *, snapshot=None):
     return None
 
 
-def session_cookie_name(port):
-    return f"hhq_viewer_{port}"
+def session_cookie_name(port, session_token):
+    # Browser cookies are not port-scoped. Separate remote viewers may share
+    # their default internal port while using different local SSH forwards.
+    launch_id = hashlib.sha256(session_token.encode()).hexdigest()[:24]
+    return f"hhq_viewer_{port}_{launch_id}"
 
 
 def bootstrap_url(server, host="127.0.0.1"):
@@ -368,7 +376,7 @@ def make_server(config, *, host="127.0.0.1", port=8765, read_only=True, session_
                 jar = SimpleCookie(self.headers.get("Cookie", ""))
             except CookieError:
                 return False
-            morsel = jar.get(session_cookie_name(self.server.server_port))
+            morsel = jar.get(session_cookie_name(self.server.server_port, session))
             return morsel is not None and matches(morsel.value, session)
 
         def unauthorized(self):
@@ -390,7 +398,7 @@ def make_server(config, *, host="127.0.0.1", port=8765, read_only=True, session_
                     return self.unauthorized()
                 rest = urlencode([(k, v) for k, vs in query.items() if k != "token" for v in vs], doseq=True)
                 cookie = (
-                    f"{session_cookie_name(self.server.server_port)}={session}; "
+                    f"{session_cookie_name(self.server.server_port, session)}={session}; "
                     "HttpOnly; SameSite=Strict; Path=/"
                 )
                 # Always a same-origin path; "//host" would be a cross-site redirect.
@@ -505,10 +513,19 @@ def make_server(config, *, host="127.0.0.1", port=8765, read_only=True, session_
 
 def serve(config, *, host="127.0.0.1", port=8765, read_only=True):
     server = make_server(config, host=host, port=port, read_only=read_only)
+    hostname = socket.gethostname()
+    port = server.server_port
+    tunnel = shlex.join([
+        "ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+        "-L", f"127.0.0.1:{port}:127.0.0.1:{port}", f"{getpass.getuser()}@{hostname}",
+    ])
     print(
+        f"Viewer host: {hostname} | mode: {'read-only' if read_only else 'generic submit form enabled'}\n"
+        f"State directory: {Path(config.state_dir).expanduser().resolve()}\n"
         f"Dashboard (loopback only): {bootstrap_url(server, host)}\n"
+        f"From another computer, if SSH to this host is permitted: {tunnel}\n"
         "This URL contains a per-launch secret. Keep it private; it is not stored on disk by HHQ.",
-        flush=True,
+        flush=True, file=sys.stderr,
     )
     try:
         server.serve_forever()

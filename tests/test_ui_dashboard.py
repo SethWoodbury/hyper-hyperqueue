@@ -49,7 +49,7 @@ def hosted(config, **kwargs):
 
 
 def session_cookie(base):
-    return f"{ui.session_cookie_name(base.rsplit(':', 1)[1])}={SESSION}"
+    return f"{ui.session_cookie_name(base.rsplit(':', 1)[1], SESSION)}={SESSION}"
 
 
 def request(base, path="/", *, form=None, headers=None, auth=True):

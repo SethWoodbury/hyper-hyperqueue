@@ -226,8 +226,8 @@ def test_real_recovery_import_is_idempotent_without_submitting_or_reexecuting_su
     assert first.exit_code == 0, first.output + str(first.exception)
     second = CliRunner().invoke(cli.app, args)
     assert second.exit_code == 0, second.output + str(second.exception)
-    cid = json.loads(first.output)["campaign_id"]
-    assert cid == json.loads(second.output)["campaign_id"]
+    cid = json.loads(first.stdout)["campaign_id"]
+    assert cid == json.loads(second.stdout)["campaign_id"]
     assert len(store.campaigns()) == 2
     assert len(store.task_ids(cid)) == 2
     assert all(store.task(cid, tid).resources.memory_mib == 4096 for tid in store.task_ids(cid))

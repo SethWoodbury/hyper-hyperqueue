@@ -3,8 +3,9 @@
 import json
 import os
 import threading
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 
 import pytest
 from test_ui_dashboard import SESSION, hosted, request
@@ -113,6 +114,55 @@ def test_default_server_is_protected_with_random_per_launch_secret(tmp_path):
     finally:
         first.server_close()
         second.server_close()
+
+
+def test_two_forwarded_viewers_keep_independent_browser_sessions(tmp_path):
+    """Two remote default-port viewers can be forwarded to different local ports."""
+    config = Config(state_dir=str(tmp_path / "missing"))
+    servers = [ui.make_server(config, port=0) for _ in range(2)]
+    bases = [f"http://127.0.0.1:{server.server_port}" for server in servers]
+    threads = []
+    try:
+        for server in servers:
+            # The sockets keep distinct local ports; both remote viewers report
+            # their default internal port, as with separate SSH forwards.
+            server.server_port = 8765
+            thread = threading.Thread(target=lambda s=server: s.serve_forever(poll_interval=0.02), daemon=True)
+            thread.start()
+            threads.append(thread)
+        jar = CookieJar()
+        browser = build_opener(HTTPCookieProcessor(jar))
+        for base, server in zip(bases, servers):
+            with browser.open(f"{base}/?token={server.session_token}", timeout=5) as response:
+                assert response.status == 200
+        for base in bases:
+            with browser.open(f"{base}/api/dashboard", timeout=5) as response:
+                assert response.status == 200
+        assert len(jar) == 2
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+
+
+def test_viewer_prints_host_state_and_private_access_instructions(tmp_path, monkeypatch, capsys):
+    config = Config(state_dir=str(tmp_path / "state"))
+    server = ui.make_server(config, port=0)
+    monkeypatch.setattr(ui, "make_server", lambda *args, **kwargs: server)
+    monkeypatch.setattr(server, "serve_forever", lambda: None)
+    monkeypatch.setattr(ui.socket, "gethostname", lambda: "compute-example")
+    monkeypatch.setattr(ui.getpass, "getuser", lambda: "example-user")
+    ui.serve(config)
+    printed = capsys.readouterr()
+    assert printed.out == ""
+    assert "Viewer host: compute-example | mode: read-only" in printed.err
+    assert str(tmp_path / "state") in printed.err
+    assert ui.bootstrap_url(server) in printed.err
+    assert "example-user@compute-example" in printed.err
+    assert "if SSH to this host is permitted" in printed.err
 
 
 def test_fifo_log_fails_without_blocking(tmp_path):

@@ -7,7 +7,18 @@ independent of that service too.
 
 Use the same configuration as the campaign. Preparing an RFD4 sweep alone does not
 import it, so it will appear after explicit launch. Native RFD4 jobs submitted
-outside HHQ do not become HHQ campaigns automatically.
+outside HHQ do not become HHQ campaigns automatically. Submission starts the
+requested scheduler service, not this separate HTML viewer. Start `hhq ui`
+explicitly; the viewer can run on a different host that can read the shared state.
+
+`hhq --config /shared/hhq/config.yaml access` prints a concise cached controller
+location and the exact viewer/status commands; add `--json` for a machine-readable
+record. Generic submission and RFD4 launch also print these hints to stderr while
+preserving their JSON stdout. `service status` reads the saved controller
+deployment, leader and HQ endpoint. Immediately after Slurm submission, the
+controller job ID can be known while its node and endpoint are still unavailable.
+Those fields become available once the controller actually starts; an HQ endpoint
+is not an HTML dashboard URL.
 
 An inherited `HHQ_STATE_DIR` overrides the configuration's state directory, as does
 the global `--state-dir` option. Check that override when a viewer appears empty
@@ -27,14 +38,18 @@ The default is read-only. `--allow-submit` explicitly enables the generic comman
 preview/submit form; the Slurm template keeps `--read-only`. Submission permissions
 and resource choices are never inferred from merely opening the viewer.
 
-The viewer prints one private URL such as
+The viewer prints its actual hostname, selected state directory, access mode,
+and an SSH-forwarding example, followed by access instructions. It prints one private URL such as
 `http://127.0.0.1:8765/?token=...`. Open exactly that URL. Every page, asset,
 API route and form post requires this random per-launch secret, including in
 read-only mode; without it the server answers `401` and reveals no records.
 Opening the URL stores the secret in an `HttpOnly`, `SameSite=Strict` session
 cookie and redirects to the same page without the token, so later address bars,
 bookmarks, and `Referer` headers (always `no-referrer`) do not carry it.
-Restarting the viewer issues a new secret; reopen the newly printed URL.
+Restarting the viewer issues a new secret; reopen the newly printed URL. Cookie
+names include a per-launch identifier, so separate viewers using the same remote
+port can coexist through different local SSH forwards without logging each other
+out.
 The submission form keeps its own separate CSRF token.
 
 The server does not log request lines and HHQ does not write the secret to disk,

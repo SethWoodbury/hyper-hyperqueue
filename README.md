@@ -74,6 +74,7 @@ Install the matching `hq` executable separately, once, on shared storage. `hhq` 
    uv run hhq status --reconcile
    uv run hhq explain TASK_ID
    uv run hhq logs TASK_ID --stderr
+   uv run hhq access        # cached controller location + exact viewer/status commands
    uv run hhq ui            # prints a private, token-protected loopback URL
    ```
 
@@ -117,6 +118,10 @@ This area is under active development. Read [recovery](docs/recovery.md) and [li
 ## Model-warm bundles and the optional RFD4 adapter
 
 The generic scheduler knows nothing about any particular application. The optional adapter under `src/hyper_hyperqueue/integrations/rfd4` turns a saved RFD4 sweep manifest into immutable task **bundles**: compatible rows run one after another in the same Python process, so imports and setup are reused. Optional settings group bundles by recipe, set method execution order and reuse models across rows. Warm execution needs qualification for the chosen model, inputs and container; cached objects do not guarantee continuous GPU residency. Preparation is separate from launch, and native seeds, inputs and output paths are preserved. See the [RFD4 guide](docs/rfd4.md) and [`hhq rfd4 --help`](src/hyper_hyperqueue/integrations/rfd4/cli.py).
+
+The optional [standalone AF3 profile helper](docs/site-example-digs.md) applies the
+same tested hardware guard on DIGS without changing scientific commands. RFD4 and
+AF3 routes exclude Titans by default there; generic CPU/GPU profiles stay unchanged.
 
 ## Operating
 

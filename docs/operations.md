@@ -172,7 +172,7 @@ uv run hhq ui --port 8765
 ssh -N -L 8765:127.0.0.1:8765 USER@CLUSTER_HOST
 ```
 
-Open `http://127.0.0.1:8765`. The server accepts loopback hostnames, protects mutations with a session token and origin checks, and refuses public binding. Local users with account access are trusted; this is not a multi-user authenticated web application. Detailed logs and commands are private; support bundles use an allowlist and omit them.
+Open the complete private URL printed by `hhq ui`, including its `?token=...` suffix. A bare `http://127.0.0.1:8765` returns `401` until that browser session is authenticated. The server accepts loopback hostnames, authenticates every route, adds separate CSRF/origin checks for mutations, and refuses public binding. Local users with account access are trusted; this is not a multi-user authenticated web application. Detailed logs and commands are private; support bundles use an allowlist and omit them.
 
 The viewer is read-only by default; add `--allow-submit` explicitly for the generic
 command form. Use `hhq ui --export /shared/private/overview.html` for a standalone

@@ -67,7 +67,9 @@ any existing profile constraint. Explicit `None` disables that application guard
 a string supplies another application guard. Other sites retain their configured
 constraints under `auto`. Generic HHQ profiles remain hardware-neutral. An opt-out
 does not qualify unsupported kernels: Titan RTX failed the inspected RFD4
-attention path; AF3-only compatibility is a separate test.
+attention path. A separate real AF3-only test also failed under the current cuDNN
+attention protocol, which requires SM80 or newer; other attention implementations
+were not tested.
 
 ```python
 from hyper_hyperqueue.config import load_config, save_config

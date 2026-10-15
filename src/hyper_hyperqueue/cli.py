@@ -52,6 +52,25 @@ def output(value):
     )
 
 
+def print_access(config):
+    from .access import access_info, access_lines
+
+    for line in access_lines(access_info(config, config_path=settings.get("config"))):
+        typer.echo(line, err=True)
+
+
+@app.command("access")
+def access(json_output: bool = typer.Option(False, "--json")):
+    """Show cached controller information and exact dashboard/status commands."""
+    from .access import access_info, access_lines
+
+    info = access_info(cfg(), config_path=settings.get("config"))
+    if json_output:
+        output(info)
+    else:
+        typer.echo("\n".join(access_lines(info)))
+
+
 def parse_time(value):
     parts = [int(x) for x in value.split(":")]
     if len(parts) != 3 or parts[1] >= 60 or parts[2] >= 60 or any(x < 0 for x in parts):
@@ -331,6 +350,7 @@ def submit(
             shell_options=recovered["execution_settings"]["shell_options"] if recovered else None,
         )
     )
+    print_access(c)
 
 
 @app.command("export-remaining")

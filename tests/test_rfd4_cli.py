@@ -74,7 +74,7 @@ def test_cli_routes_prepared_path_and_explicit_config(tmp_path, monkeypatch, com
     prepared_path = tmp_path / "prepared.json"
     result = CliRunner().invoke(app, ["--config", str(config_path), "rfd4", command, str(prepared_path)])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"test_route": command}
+    assert json.loads(result.stdout) == {"test_route": command}
     expected_kwargs = {"reconcile": False} if command in {"status", "collection-ready"} else {}
     assert calls == [(Path(prepared_path), str(state_path), expected_kwargs)]
     assert not state_path.exists()

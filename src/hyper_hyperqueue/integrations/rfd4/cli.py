@@ -62,10 +62,12 @@ def preview_command(prepared: Path):
 @app.command("launch")
 def launch_command(prepared: Path):
     """Explicitly admit prepared scientific work and start its pooled service."""
-    from ...cli import cfg, output
+    from ...cli import cfg, output, print_access
     from .submission import launch
 
-    output(launch(prepared, cfg()))
+    config = cfg()
+    output(launch(prepared, config))
+    print_access(config)
 
 
 @app.command("status")

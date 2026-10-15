@@ -139,8 +139,12 @@ in addition to the seed field.
 The observed working models are those in the table. The pinned RFD4 attention
 path failed on Titan RTX despite simpler BF16/TransformerEngine probes passing.
 Use the RFD4-specific qualified generation constraint; generic HHQ remains
-hardware-neutral. This finding does not establish AF3-only Titan compatibility;
-a separate real AF3 test is pending. H200 is unmeasured here, not inherently
+hardware-neutral. A separate real AF3-only Titan test also failed in cuDNN SDPA
+with an explicit SM80-or-newer requirement, before producing a structure. It used
+8.20 GiB of 18 GiB host RAM and sampled 4,284 MiB of 24,022 MiB GPU memory; this
+was an attention-architecture failure, not evidence of OOM. The inspected AF3
+image was `af3-open-2026-08-19.sif`; alternate attention backends remain untested.
+H200 is unmeasured here, not inherently
 unsupported. Temporary unhealthy nodes require separate, revisitable exclusions.
 See [site-specific compatibility and billing](site-example-digs.md) and the
 [native feature comparison](native-rfd4-comparison.md).
