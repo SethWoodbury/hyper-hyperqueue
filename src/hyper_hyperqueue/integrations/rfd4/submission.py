@@ -12,23 +12,13 @@ from ...ingest import import_campaign_id
 from ...models import Config, OutputPolicy, Resources, RetryPolicy
 from ...planner import compatible, gpu_count
 from ...state import StateStore, atomic_json, file_lock, fingerprint, identifier, read_json, utc_now
+from ..gpu_compatibility import DIGS_MODERN_GPU_CONSTRAINT, merge_gpu_constraint
 
-DIGS_RFD4_GPU_CONSTRAINT = "Ampere|Lovelace|Hopper|Blackwell"
+DIGS_RFD4_GPU_CONSTRAINT = DIGS_MODERN_GPU_CONSTRAINT
 
 
 def _rfd4_constraint(existing, requested, cluster):
-    # Feature labels belong to the deployment; generic HHQ is unrestricted.
-    guard = DIGS_RFD4_GPU_CONSTRAINT if requested == "auto" and cluster == "digs" else requested
-    if guard in (None, "auto"):
-        return existing
-    if not isinstance(guard, str) or not guard.strip() or any(c in guard for c in "\n\r\x00"):
-        raise ValueError("compatibility_constraint must be 'auto', None, or a nonempty Slurm constraint")
-    guard = guard.strip()
-    if not existing or existing == guard:
-        return guard
-    if existing.startswith("(") and existing.endswith(f")&({guard})"):
-        return existing  # Already AND-ed by this helper; preserve exact config identity.
-    return f"({existing})&({guard})"
+    return merge_gpu_constraint(existing, requested, cluster)
 
 
 def apply_rfd4_gpu_constraints(
