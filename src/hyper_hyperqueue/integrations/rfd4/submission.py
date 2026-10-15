@@ -13,6 +13,21 @@ from ...models import Config, OutputPolicy, Resources, RetryPolicy
 from ...planner import compatible, gpu_count
 from ...state import StateStore, atomic_json, file_lock, fingerprint, identifier, read_json, utc_now
 
+DIGS_RFD4_GPU_CONSTRAINT = "Ampere|Lovelace|Hopper|Blackwell"
+
+
+def _rfd4_constraint(existing, requested, cluster):
+    # Feature labels belong to the deployment; generic HHQ is unrestricted.
+    guard = DIGS_RFD4_GPU_CONSTRAINT if requested == "auto" and cluster == "digs" else requested
+    if guard in (None, "auto"):
+        return existing
+    if not isinstance(guard, str) or not guard.strip() or any(c in guard for c in "\n\r\x00"):
+        raise ValueError("compatibility_constraint must be 'auto', None, or a nonempty Slurm constraint")
+    guard = guard.strip()
+    if not existing or existing == guard:
+        return guard
+    return f"({existing})&({guard})"
+
 
 def _verified(prepared, *, check_sources=True):
     from .prepare import verify_prepared
@@ -368,7 +383,7 @@ def submit_aggregation(
 
 def method_profiles(
     base_config: Config, requests_by_method: dict, eligible_profile_names: list[str],
-    *, eligible_profiles_by_method: dict | None = None,
+    *, eligible_profiles_by_method: dict | None = None, compatibility_constraint: str | None = "auto",
 ) -> Config:
     """Clone explicit GPU placements with task RAM plus the fixed worker reserve.
 
@@ -377,6 +392,9 @@ def method_profiles(
     The returned config exposes workload aliases ``rfd4-<method>``. Build it before
     starting a service; changing a running service's frozen config is rejected.
     Declared estimates are operator assumptions, not measurements.
+    DIGS RFD4 profiles default to modern GPU features, AND-ed with custom Slurm
+    constraints. Explicit None disables this application guard; other clusters
+    retain their placements unless a site-specific guard is supplied.
     """
     config = base_config.model_copy(deep=True)
     if not requests_by_method or not eligible_profile_names:
@@ -412,6 +430,7 @@ def method_profiles(
                     "memory_mib": request.memory_mib + config.policy.worker_overhead_mib,
                     "cpus": max(base.cpus, request.cpus),
                     "execution_mode": "pooled",
+                    "constraint": _rfd4_constraint(base.constraint, compatibility_constraint, config.cluster),
                 }
             )
             valid, reason = compatible(request, clone, config)

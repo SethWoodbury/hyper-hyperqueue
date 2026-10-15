@@ -10,8 +10,8 @@ app = typer.Typer(no_args_is_help=True, help="Prepare and execute saved native R
 
 def _options(path: Path) -> dict:
     value = yaml.safe_load(path.read_text())
-    if not isinstance(value, dict) or set(value) - {"runtime", "workloads", "reuse_model"}:
-        raise ValueError("Options must contain runtime, workloads, and optional reuse_model")
+    if not isinstance(value, dict) or set(value) - {"runtime", "workloads", "reuse_model", "group_by_recipe", "execution_order"}:
+        raise ValueError("Options accept runtime, workloads, reuse_model, group_by_recipe and execution_order")
     if not {"runtime", "workloads"} <= value.keys():
         raise ValueError("Options require explicit runtime and workload resource settings")
     return value

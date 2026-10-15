@@ -627,3 +627,37 @@ def test_pre_recovery_config_receipt_compatibility_is_disabled_defaults_only(con
     assert expected in _config_fingerprints(config)
     config.policy.cancel_pending_when_assigned = True
     assert expected not in _config_fingerprints(config)
+
+
+def test_rfd4_digs_gpu_guard_is_scoped_and_does_not_widen_custom_constraints(config):
+    request = Resources(gpus=1, memory_mib=2048, runtime_seconds=60, runtime_confidence="declared")
+    config.cluster = "digs"
+    config.profiles["gpu"].constraint = "UW&(A4000|TitanRTX)"
+    before = config.model_dump()
+    result = rfd4.method_profiles(config, {"beam": request}, ["gpu"])
+    assert config.model_dump() == before
+    assert result.profiles["gpu"].constraint == "UW&(A4000|TitanRTX)"
+    assert result.profiles["rfd4-beam-gpu"].constraint == (
+        "(UW&(A4000|TitanRTX))&(Ampere|Lovelace|Hopper|Blackwell)")
+    assert rfd4.method_profiles(config, {"beam": request}, ["gpu"], compatibility_constraint=None
+                              ).profiles["rfd4-beam-gpu"].constraint == config.profiles["gpu"].constraint
+
+
+def test_rfd4_default_features_and_explicit_other_cluster_override(config):
+    request = Resources(gpus=1, memory_mib=2048, runtime_seconds=60, runtime_confidence="declared")
+    config.cluster = "digs"
+    guarded = rfd4.method_profiles(config, {"gradient": request}, ["gpu"])
+    assert guarded.profiles["rfd4-gradient-gpu"].constraint == rfd4.DIGS_RFD4_GPU_CONSTRAINT
+    config.cluster = "different_site"
+    assert rfd4.method_profiles(config, {"gradient": request}, ["gpu"]
+                              ).profiles["rfd4-gradient-gpu"].constraint is None
+    config.profiles["gpu"].constraint = "rack7"
+    explicit = rfd4.method_profiles(config, {"gradient": request}, ["gpu"], compatibility_constraint="cuda80|cuda90")
+    assert explicit.profiles["rfd4-gradient-gpu"].constraint == "(rack7)&(cuda80|cuda90)"
+
+
+@pytest.mark.parametrize("constraint", [False, 42, "", "\nA4000"])
+def test_rfd4_rejects_invalid_compatibility_override(config, constraint):
+    request = Resources(gpus=1, memory_mib=2048, runtime_seconds=60, runtime_confidence="declared")
+    with pytest.raises(ValueError, match="compatibility_constraint"):
+        rfd4.method_profiles(config, {"gradient": request}, ["gpu"], compatibility_constraint=constraint)

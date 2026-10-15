@@ -20,6 +20,7 @@ import yaml
 
 from ...models import Resources, RetryPolicy
 from ...state import atomic_bytes, ensure_directory, file_lock, fingerprint, json_bytes
+from .packing import bundle_estimate, recipe_packing, validate_packing
 from .runtime import identity
 
 RUNTIME_SCRIPT = Path(__file__).with_name("runtime.py")
@@ -215,7 +216,7 @@ def _command(command: str, *, repo: Path, config: Path) -> tuple[dict, list[str]
 
 
 def _workload(value: dict) -> dict:
-    if not isinstance(value, dict) or set(value) - {"profile", "resources", "runs_per_task", "max_attempts", "priority", "retry"}:
+    if not isinstance(value, dict) or set(value) - {"profile", "resources", "runs_per_task", "max_attempts", "priority", "retry", "packing"}:
         raise ValueError("Unknown workload setting")
     if not isinstance(value.get("profile"), str) or not value["profile"].strip():
         raise ValueError("Each workload requires an explicit profile")
@@ -249,6 +250,8 @@ def _workload(value: dict) -> dict:
         if type(priority) is not int or not -(2**31) <= priority < 2**31:
             raise ValueError("Workload priority must be a signed 32-bit integer")
         result["priority"] = priority
+    if "packing" in value:
+        result["packing"] = validate_packing(value["packing"], resources)
     return result
 
 
@@ -333,6 +336,8 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
     if not isinstance(workloads, dict) or set(workloads) - _METHODS:
         raise ValueError("Workloads must be keyed by generate, gradient or beam")
     workload_specs = {method: _workload(spec) for method, spec in workloads.items()}
+    if not group_by_recipe and any("packing" in spec for spec in workload_specs.values()):
+        raise ValueError("Runtime-driven packing requires group_by_recipe=True")
     repo = _path(source["repo"])
     bindings = {str(path): original_sha}
     required_maps = ("input_sha256", "file_sha256", "native_config_sha256")
@@ -447,6 +452,7 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
     _verify(bindings)
     software_fingerprint = fingerprint({"commit": commit, "sources": software_sources, "runtime": runtime})
     bundles = []
+    packing_summary = []
     grouped = list(groups.items())
     if group_by_recipe or execution_order is not None:
         order = execution_order or list(dict.fromkeys(row["method"] for row in rows))
@@ -462,8 +468,13 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
         if group_by_recipe:
             group = sorted(group, key=lambda row: (row["input"], row["run_id"]))
         workload = workload_specs[method]
-        for start in range(0, len(group), workload["runs_per_task"]):
-            chosen_rows = group[start : start + workload["runs_per_task"]]
+        packing = recipe_packing(workload["packing"], recipe, workload["runs_per_task"]) if "packing" in workload else None
+        count = packing["runs_per_task"] if packing else workload["runs_per_task"]
+        if packing:
+            packing_summary.append({"method": method, **packing, "scientific_calls": len(group),
+                                    **{k: group[0].get(k) for k in ("variant", "thinking", "bb_noise", "latent_noise")}})
+        for start in range(0, len(group), count):
+            chosen_rows = group[start : start + count]
             needed = {
                 *software_sources,
                 *normalized_maps["native_config_sha256"],
@@ -490,6 +501,8 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
                 bundle["host_script"] = str(_path(HOST_SCRIPT))
             if group_by_recipe:
                 bundle["recipe_id"] = recipe
+            if packing:
+                bundle["packing_estimate"] = bundle_estimate(packing, len(chosen_rows))
             bundle["bundle_id"] = "b_" + fingerprint(bundle)[:24]
             bundles.append(bundle)
     warnings = list(source.get("warnings", [])) + [
@@ -501,6 +514,8 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
         warnings.append("Cross-config model reuse is opt-in and requires workload-specific qualification.")
     if execution_order is not None:
         warnings.append("execution_order is a soft HQ task preference, not a completion barrier or Slurm scheduling priority.")
+    if packing_summary:
+        warnings.append("Packing timings are explicit recipe/hardware estimates, not automatic tuning. Tail bundles retain the method fit budget; slot cleanup still applies.")
     plan = {
         "schema": "hhq-rfd4-plan/1",
         "software_fingerprint": software_fingerprint,
@@ -524,6 +539,8 @@ def plan_sweep(manifest_path, *, runtime: dict, workloads: dict, reuse_model=Fal
             if group_by_recipe else list(recipes.values()),
             execution_order=list(dict.fromkeys(bundle["method"] for bundle in bundles)),
         )
+    if packing_summary:
+        plan["summary"]["packing"] = packing_summary
     plan["plan_id"] = "p_" + fingerprint(plan)[:24]
     return plan
 

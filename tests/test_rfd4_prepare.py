@@ -665,3 +665,90 @@ def test_invalid_or_conflicting_retry_policy_rejected(sweep, change):
     sweep["workloads"]["generate"].update(change)
     with pytest.raises(ValueError):
         plan(sweep)
+
+
+def _packing_options(**overrides):
+    return {"target_seconds": 1440, "fit_seconds": 1200, "startup_seconds": 100,
+            "safety_factor": 1.0, "seconds_per_row": 400, **overrides}
+
+
+def test_measured_packing_preserves_calls_and_roundtrips_short_tail(sweep, tmp_path):
+    before = deepcopy(sweep["manifest"]["rows"])
+    sweep["workloads"]["generate"].update(runs_per_task=100, packing=_packing_options())
+    result = plan(sweep, group_by_recipe=True)
+    batches = [b for b in result["bundles"] if b["method"] == "generate"]
+    assert [len(b["rows"]) for b in batches] == [2, 1]
+    assert [b["packing_estimate"]["estimated_seconds"] for b in batches] == [900, 500]
+    assert [b["workload"]["resources"]["runtime_seconds"] for b in batches] == [1200, 1200]
+    all_rows = [r for b in result["bundles"] for r in b["rows"]]
+    assert sorted((r["run_id"], r["seed"], r["input"], r["output_dir"]) for r in all_rows) == sorted(
+        (r["run_id"], r["seed"], r["input"], r["output_dir"]) for r in before)
+    assert sweep["manifest"]["rows"] == before
+    prepared = prepare.prepare_sweep(result, tmp_path / "packed")
+    assert prepare.verify_prepared(prepared)["summary"]["packing"][0]["runs_per_task"] == 2
+    assert prepared["summary"]["packing"][0]["thinking"] == "medium"
+    assert prepared["summary"]["packing"][0]["variant"] == "test"
+    assert not any(Path(r["output_dir"]).exists() for r in before)
+
+
+def test_recipe_cost_override_and_hard_count_cap(sweep):
+    initial = plan(sweep, group_by_recipe=True)
+    recipe = next(b["recipe_id"] for b in initial["bundles"] if b["method"] == "generate")
+    workload = sweep["workloads"]["generate"]
+    workload.update(runs_per_task=100, packing=_packing_options(seconds_per_row=2000,
+                    seconds_per_row_by_recipe={recipe: 300}))
+    result = plan(sweep, group_by_recipe=True)
+    batches = [b for b in result["bundles"] if b["method"] == "generate"]
+    assert len(batches) == 1 and len(batches[0]["rows"]) == 3
+    assert batches[0]["packing_estimate"]["timing_source"] == "recipe"
+    workload["runs_per_task"] = 1
+    result = plan(sweep, group_by_recipe=True)
+    assert [len(b["rows"]) for b in result["bundles"] if b["method"] == "generate"] == [1, 1, 1]
+
+
+def test_packing_requires_recipe_grouping_and_explicit_whole_bundle_fit(sweep):
+    sweep["workloads"]["generate"]["packing"] = _packing_options()
+    with pytest.raises(ValueError, match="group_by_recipe"):
+        plan(sweep)
+    sweep["workloads"]["generate"]["packing"]["fit_seconds"] = 1100
+    with pytest.raises(ValueError, match="resources.runtime_seconds"):
+        plan(sweep, group_by_recipe=True)
+
+
+@pytest.mark.parametrize("packing", [
+    {}, _packing_options(unknown=1), _packing_options(target_seconds=float("inf")),
+    _packing_options(seconds_per_row=0), _packing_options(seconds_per_row=True),
+    _packing_options(seconds_per_row=float("nan")), _packing_options(safety_factor=.9),
+    _packing_options(startup_seconds=1200), _packing_options(target_seconds=1000),
+    _packing_options(seconds_per_row_by_recipe={"id": -1}),
+    _packing_options(seconds_per_row=None, seconds_per_row_by_recipe={}),
+])
+def test_packing_rejects_invalid_or_unknown_costs(sweep, packing):
+    sweep["workloads"]["generate"]["packing"] = packing
+    with pytest.raises(ValueError):
+        plan(sweep, group_by_recipe=True)
+
+
+def test_packing_never_silently_fits_oversize_or_unknown_recipe(sweep):
+    workload = sweep["workloads"]["generate"]
+    workload["packing"] = _packing_options(seconds_per_row=1101)
+    with pytest.raises(ValueError, match="one row exceeds"):
+        plan(sweep, group_by_recipe=True)
+    workload["packing"] = _packing_options(seconds_per_row=None, seconds_per_row_by_recipe={"other": 1})
+    with pytest.raises(ValueError, match="No packing timing"):
+        plan(sweep, group_by_recipe=True)
+
+
+def test_packing_slack_fits_two_eight_hour_or_three_twelve_hour_budgets():
+    from hyper_hyperqueue.integrations.rfd4.packing import bundle_estimate, recipe_packing, validate_packing
+    from hyper_hyperqueue.models import Resources
+
+    resources = Resources(runtime_seconds=14100)
+    packing = validate_packing({"target_seconds": 14400, "fit_seconds": 14100,
+                               "startup_seconds": 120, "safety_factor": 1.1,
+                               "seconds_per_row": 600}, resources)
+    recipe = recipe_packing(packing, "test", 100)
+    assert recipe["runs_per_task"] == 21
+    assert bundle_estimate(recipe, 21)["conservative_estimate_seconds"] <= 14100
+    assert 2 * resources.runtime_seconds + 120 < 8 * 3600
+    assert 3 * resources.runtime_seconds + 120 < 12 * 3600
