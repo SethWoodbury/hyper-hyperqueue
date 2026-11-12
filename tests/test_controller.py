@@ -62,10 +62,12 @@ def test_unknown_array_adoption_deduplicates_parent(tmp_path):
     assert store.intents()[0]["state"] == "submitted"
 
 
-def test_hq_retry_retires_only_failed_occurrence_and_honors_cap(tmp_path):
+def test_hq_retry_retires_only_failed_occurrence_and_honors_cap(tmp_path, monkeypatch):
     store, value = campaign(tmp_path)
     cid = value["campaign_id"]
     failed, untouched = value["task_ids"]
+    monkeypatch.setenv("HQ_JOB_ID", "7")
+    monkeypatch.setenv("HQ_TASK_ID", "0")
     assert run_task(store.root, cid, failed) == 3
     store.put_intent(
         {
@@ -77,6 +79,7 @@ def test_hq_retry_retires_only_failed_occurrence_and_honors_cap(tmp_path):
             "hq_job_id": 7,
         }
     )
+    store.update_task_state(cid, failed, {"submission_token": "abcdefgh"})
     decisions = controller.retry_ready_failures(store, Config(state_dir=str(store.root)), [value])
     assert decisions[0]["decision"] == "retry_authorized"
     assert store.task_state(cid, failed)["state"] == "retry_wait"

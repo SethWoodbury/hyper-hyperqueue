@@ -5,7 +5,7 @@
 | Failure | Behavior |
 | --- | --- |
 | Controller exits | Supervisor restarts it within a bounded circuit breaker; HQ and its journal stay live. |
-| Application returns nonzero | The attempt remains failed; HQ does not cancel unrelated tasks in that job. |
+| Application returns nonzero | Preserve the failed attempt; retry only under its configured reason, output and attempt policy. Unrelated tasks continue. |
 | Worker disappears | HQ marks its affected tasks failed (`crash_limit=0`); hhq alone owns bounded retries after positive allocation termination and output-policy checks. |
 | HQ or control allocation dies | Stop admission; fence exact old control and workers; acquire the lifetime lock; restore journal in a new epoch. Workers do not survive HQ restart. |
 | Control walltime approaches | `USR1` stops admissions and drains. Workers advertise a lifetime bounded by the control allocation, including cleanup reserve. Opt-in planned renewal prestarts one waiting successor and requires a graceful handoff plus terminal ownership proof; qualified standby is a separate recovery option. |
@@ -59,6 +59,35 @@ The adapter refuses an unrelated or unproven job. Repeat only for the exact old 
 Missing accounting, ambiguous submission acknowledgements, or unknown ownership still blocks restart. Resolve those identities with the scheduler/operator; do not delete a lock, alter an epoch, or invent terminal evidence. A pending control stopped before it acquires leadership will exit before starting HQ when Slurm starts it. Explicitly cancel that exact pending allocation if it should also leave the Slurm queue immediately.
 
 ## Finishing a partially completed command file
+
+### Bounded retries for new CLI submissions
+
+The generic CLI defaults to three application attempts and three additional
+infrastructure recoveries. `--max-attempts`, `--infrastructure-retries`, and
+`--same-error-limit` expose these limits; the signature limit defaults to two,
+with zero disabling it. A signature covers the exit reason/code and bounded
+terminal stderr diagnostics. Matching signatures suggest a repeatable problem;
+they do not prove a deterministic bug. A manual retry may bypass the signature
+cutoff but cannot exceed the attempt limits.
+
+Only proven worker loss, preemption, or allocation expiry uses the infrastructure
+allowance. Task timeouts, OOM and ordinary application errors do not. Every
+allocation still consumes the shared resource budget. Counts persist across
+controller restarts. Existing immutable task policies retain their original
+total-attempt semantics; recovery imports inherit their saved policy unless retry
+flags explicitly override it. Python callers opt in with the optional
+`RetryPolicy.max_infrastructure_retries` and `same_error_limit` fields.
+
+Automatic application retries require safe outputs (`--repeatable` or isolated
+outputs). Unknown/interrupted execution requires repeatable outputs outside
+`manual_on_ambiguity`. A lost HQ dispatch without an attempt record additionally
+requires exact dispatch ownership and positive termination of every possibly
+involved worker across epochs. Unknown or canceled workers keep it blocked for
+inspection. Finished commands are never replayed.
+
+Terminal accounting with erased names/comments can use a previously token-matched
+RUNNING observation only when job ID, user, submit time and start time all match.
+Without that evidence, HHQ continues waiting; a job ID alone never proves ownership.
 
 Commands have independent attempt records and validated completion markers.
 Resuming the same campaign skips successful occurrences; it does not rerun the

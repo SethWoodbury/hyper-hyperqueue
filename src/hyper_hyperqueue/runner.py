@@ -22,6 +22,7 @@ from .adaptive_recovery import (
 )
 from .logs import log_directory
 from .models import TaskSpec
+from .retry_policy import INFRASTRUCTURE_REASONS, failure_signature, retry_budget_error, unstarted_loss_proof
 from .state import StateStore, atomic_json, ensure_directory, file_lock, fingerprint, read_json, utc_now
 from .telemetry import ProcessSampler, ResourceMismatch, allocation_context, assigned_gpu_context
 
@@ -291,6 +292,34 @@ def internal_fencing_evidence(
     return {**proof, "fencing_intent_path": str(intent_path), "fencing_intent_sha256": binding["sha256"]}
 
 
+def authorize_unstarted_retry(store, campaign_id, task_id):
+    """Recover a lost dispatch without inventing an application attempt."""
+    with store.lock(), file_lock(store.campaign_dir(campaign_id) / "task_locks" / f"{task_id}.lock",
+                                 blocking=False):
+        from .adaptive_recovery import user_canceled
+
+        task, state = store.task(campaign_id, task_id), store.task_state(campaign_id, task_id)
+        if store.attempts(campaign_id, task_id) or state.get("state") not in {"interrupted", "failed"}:
+            raise ValueError("Task is not an unstarted interrupted dispatch")
+        if (user_canceled(store, task) or "worker_lost" not in task.retry.reasons
+                or not task.output.repeatable or task.output.mode == "manual_on_ambiguity"):
+            raise ValueError("Policy does not allow replay of this unstarted dispatch")
+        dispatch, proof_hash, worker_tokens = unstarted_loss_proof(store, task, state)
+        binding = {"dispatch": dispatch, "proof_sha256": proof_hash, "worker_tokens": worker_tokens}
+        error = retry_budget_error(task, [], state, prestart_dispatch=dispatch)
+        if error:
+            store.update_task_state(campaign_id, task_id, {
+                "state": "failed", "reason": "retry_exhausted",
+                "prestart_terminal_failure": binding,
+            })
+            raise ValueError(error)
+        return store.update_task_state(campaign_id, task_id, {
+            "state": "retry_wait", "retry_authorized": True,
+            "prestart_retry_dispatches": sorted(set(state.get("prestart_retry_dispatches", [])) | {dispatch}),
+            "prestart_recovery": binding,
+        })
+
+
 def authorize_retry(
     store: StateStore,
     campaign_id: str,
@@ -321,11 +350,17 @@ def authorize_retry(
             state["state"] == "canceled" and not (internal or scheduler)
         ):
             raise ValueError(f"Task is not retryable: {state['state']}")
-        if len(attempts) >= task.retry.max_attempts:
-            raise ValueError("Retry attempt limit exhausted; import a new generation to change policy")
         if not attempts:
             raise ValueError("No attempt evidence; reconcile submission ownership before retry")
         latest = attempts[-1]
+        infrastructure = bool(internal or (scheduler and scheduler["reason"] in INFRASTRUCTURE_REASONS))
+        error = retry_budget_error(
+            task, attempts, state,
+            infrastructure_attempt=latest["attempt_id"] if infrastructure else None,
+            automatic=not manual,
+        )
+        if error:
+            raise ValueError(error)
         token = state.get("submission_token")
         if token:
             active = [
@@ -399,6 +434,10 @@ def authorize_retry(
         override = prepare_resource_override(store, task, latest, reason)
         if override:
             update["resource_override"] = override
+        if infrastructure and task.retry.max_infrastructure_retries is not None:
+            update["infrastructure_attempt_ids"] = sorted(
+                set(state.get("infrastructure_attempt_ids", [])) | {latest["attempt_id"]}
+            )
         return store.update_task_state(campaign_id, task_id, update)
 
 
@@ -417,6 +456,8 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                     raise ValueError("Completion fingerprint differs from immutable task")
                 return 0
             coordinator = read_json(directory / "task_states" / f"{task.task_id}.json")
+            if coordinator.get("prestart_terminal_failure"):
+                return 75
             if coordinator.get("status") in {"canceled", "blocked"}:
                 return 130 if coordinator["status"] == "canceled" else 75
             assigned_epoch = coordinator.get("server_epoch")
@@ -453,6 +494,10 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                             },
                         )
                         return 0
+                    if (task.retry.max_infrastructure_retries is not None
+                            and not (coordinator.get("retry_authorized") is True
+                                     and coordinator.get("after_attempt_id") == previous["attempt_id"])):
+                        return 75  # A new policy needs the single retry owner's exact authorization.
                     manually_authorized = (
                         coordinator.get("manual_retry") is True
                         and coordinator.get("after_attempt_id") == previous["attempt_id"]
@@ -469,7 +514,7 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                         )
                     ):
                         return 75
-            if len(attempts) >= task.retry.max_attempts:
+            if retry_budget_error(task, attempts, coordinator, automatic=not coordinator.get("manual_retry")):
                 return 75
             if (attempts and task.retry.oom_memory_multipliers
                     and attempts[-1].get("result", {}).get("reason") == "host_oom"
@@ -614,6 +659,8 @@ def run_task(state_dir: str | Path, campaign_id: str, task_id: str) -> int:
                     result.update(reason="resource_mismatch", exit_code=78, error=str(error))
                 except (OSError, ValueError, RuntimeError) as error:
                     result["error"] = f"{type(error).__name__}: {error}"
+                if task.retry.same_error_limit and result["reason"] == "application_exit":
+                    result["failure_signature"] = failure_signature(result, logs / "stderr")
                 result["finished_at"] = utc_now()
                 atomic_json(attempt_dir / "result.json", result)
                 if result["status"] == "succeeded":

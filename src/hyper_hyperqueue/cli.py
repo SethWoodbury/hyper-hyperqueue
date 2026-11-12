@@ -256,12 +256,18 @@ def submit(
     input_fingerprint: str | None = None,
     software_fingerprint: str | None = None,
     recovery_manifest: Path | None = None,
+    infrastructure_retries: int | None = None,
+    same_error_limit: int | None = None,
 ):
     """Import once; direct arrays continue after this CLI exits.
 
     Direct --cpus/--mem override allocation resources. In pooled mode they are
     task requirements that must fit a configured worker. MPI needs an explicit
     launcher in each command; --nodes/--ranks only reserve the Slurm layout.
+    New imports default to 3 application attempts, 3 separate infrastructure
+    retries, and stop after 2 matching error signatures. Replay still requires
+    --repeatable or isolated outputs. Recovery imports preserve saved policy
+    unless its retry flags are explicitly supplied; 0 disables same-error cutoff.
     """
     c, p, r = options(profile, partition, cpus, mem, gpus, time, runtime, timeout, mode,
                       1 if nodes is None else nodes, 1 if ranks is None else ranks)
@@ -337,7 +343,15 @@ def submit(
             retry=RetryPolicy.model_validate({
                 **recovered["execution_settings"]["retry"],
                 **({"max_attempts": max_attempts} if max_attempts is not None else {}),
-            }) if recovered else RetryPolicy(max_attempts=1 if max_attempts is None else max_attempts),
+                **({"max_infrastructure_retries": infrastructure_retries}
+                   if infrastructure_retries is not None else {}),
+                **({"same_error_limit": same_error_limit} if same_error_limit is not None else {}),
+            }) if recovered else RetryPolicy(
+                max_attempts=3 if max_attempts is None else max_attempts,
+                max_infrastructure_retries=3 if infrastructure_retries is None else infrastructure_retries,
+                same_error_limit=2 if same_error_limit is None else same_error_limit,
+                reasons=["worker_lost", "preempted", "allocation_timeout", "application_exit"],
+            ),
             output=OutputPolicy.model_validate(recovered["execution_settings"]["output"])
             if recovered else OutputPolicy(mode=output_mode or "manual_on_ambiguity", repeatable=bool(repeatable)),
             environment=recovered["execution_settings"]["environment"] if recovered else None,

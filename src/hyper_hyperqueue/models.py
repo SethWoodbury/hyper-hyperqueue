@@ -26,6 +26,8 @@ class Resources(Model):
 class RetryPolicy(Model):
     max_attempts: int = Field(1, ge=1, le=100)
     reasons: list[str] = Field(default_factory=lambda: ["worker_lost", "preempted"])
+    max_infrastructure_retries: int | None = Field(None, ge=0, le=100)
+    same_error_limit: int | None = Field(None, ge=0, le=100)
     oom_memory_multipliers: list[float] = Field(default_factory=list)
     # Retained for schema-1 manifest compatibility; resource-changing retries
     # require a new immutable task generation in this release.
@@ -49,6 +51,9 @@ class RetryPolicy(Model):
         value = handler(self)
         if not self.oom_memory_multipliers:
             value.pop("oom_memory_multipliers", None)
+        for key in ("max_infrastructure_retries", "same_error_limit"):
+            if getattr(self, key) is None:
+                value.pop(key, None)
         return value
 
 

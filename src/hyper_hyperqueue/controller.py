@@ -19,7 +19,7 @@ from .config import load_config
 from .logs import log_directory
 from .models import Config, TaskSpec
 from .planner import capacity_plan, fits_remaining_control
-from .runner import attempt_epoch, authorize_retry, internal_fencing_evidence
+from .runner import attempt_epoch, authorize_retry, authorize_unstarted_retry, internal_fencing_evidence
 from .state import StateStore, atomic_json
 
 TERMINAL = {
@@ -43,9 +43,17 @@ def terminal_state(value):
 def owned_record(record, intent):
     """Positive scheduler identity, not merely a job number reused after retention."""
     token = intent["token"]
-    return record.get("comment") == f"hhq:{token}" or (
+    if record.get("comment") == f"hhq:{token}" or (
         not record.get("comment") and record.get("name", "").endswith(f"-{token}")
-    )
+    ):
+        return True
+    # Some sites replace terminal names/comments. Require the exact incarnation
+    # previously observed with our token, never a numeric job ID alone.
+    observed = intent.get("ownership_observation", {})
+    return bool(not record.get("comment") and record.get("name") in ("", "allocation")
+                and observed.get("submit_time") and observed.get("start_time")
+                and all(record.get(k) == observed.get(k)
+                        for k in ("job_id", "user", "submit_time", "start_time")))
 
 
 def mapping(value):
@@ -122,6 +130,16 @@ def reconcile_slurm(store, slurm, jobs):
         jid = str(intent["job_id"])
         if jid in by_base:
             intent["state"] = "running" if any(j["state"] == "RUNNING" for j in by_base[jid]) else "submitted"
+            if intent["backend"] == "worker":
+                for row in by_base[jid]:
+                    if (row["state"] == "RUNNING" and row.get("user")
+                            and row.get("user") == getattr(slurm, "user", None)
+                            and row.get("submit_time") and row.get("start_time")
+                            and (row.get("comment") == f"hhq:{intent['token']}"
+                                 or row.get("name", "").endswith(f"-{intent['token']}"))):
+                        intent["ownership_observation"] = {
+                            key: row[key] for key in ("job_id", "user", "submit_time", "start_time")
+                        }
             timed = [j for j in by_base[jid] if j.get("time_limit_seconds")]
             if timed:
                 current_time = time.time()
@@ -305,6 +323,22 @@ def reconcile_hq(store, hq):
                     continue
                 if current.get("state") == "retry_wait" and current.get("retry_authorized") is True:
                     latest = current.get("latest_attempt", {})
+                    prestart = current.get("prestart_recovery")
+                    if not latest and prestart:
+                        from .retry_policy import unstarted_loss_proof
+                        try:
+                            dispatch, digest, tokens = unstarted_loss_proof(
+                                store, store.task(intent["campaign_id"], tid), current,
+                                prestart["worker_tokens"],
+                            )
+                            if prestart == {"dispatch": dispatch, "proof_sha256": digest,
+                                            "worker_tokens": tokens}:
+                                intent["retired_task_ids"] = sorted(set(intent.get("retired_task_ids", [])) | {tid})
+                                intent.setdefault("retired_task_evidence", {})[tid] = prestart
+                                store.put_intent(intent)
+                        except (KeyError, ValueError):
+                            pass  # Preserve uncertain identity; never adopt an old failed occurrence.
+                        continue
                     env = latest.get("context", {}).get("environment", {})
                     if (current.get("after_attempt_id") == latest.get("attempt_id")
                             and latest.get("attempt_id") is not None
@@ -355,7 +389,19 @@ def retry_ready_failures(store, config, campaigns):
                 continue
             task = store.task(cid, tid)
             attempt = state.get("latest_attempt")
-            if not attempt or user_canceled(store, task):
+            if user_canceled(store, task):
+                continue
+            if not attempt:
+                try:
+                    authorize_unstarted_retry(store, cid, tid)
+                except (ValueError, BlockingIOError) as exc:
+                    decisions.append({"task_id": tid, "decision": "retry_blocked", "reason": str(exc)})
+                    continue
+                for intent in intents:
+                    if intent.get("token") == state.get("submission_token"):
+                        intent["retired_task_ids"] = sorted(set(intent.get("retired_task_ids", [])) | {tid})
+                        store.put_intent(intent)
+                decisions.append({"task_id": tid, "decision": "retry_authorized", "reason": "worker_lost"})
                 continue
             reason = attempt.get("result", {}).get("reason") or state.get("reason")
             proof_path = None
@@ -374,11 +420,15 @@ def retry_ready_failures(store, config, campaigns):
                         continue
                     proof_path = save_scheduler_proof(store, task, attempt, proof)
                 elif "result" not in attempt or state.get("state") == "canceled":
+                    if task.retry.max_infrastructure_retries is not None:
+                        decisions.append({"task_id": tid, "decision": "retry_waiting",
+                                          "reason": "Waiting for exact terminal allocation evidence"})
                     continue
             try:
                 authorize_retry(store, cid, tid, terminal_evidence=proof_path)
             except ValueError as exc:
-                if proof_path is not None and ("attempt limit exhausted" in str(exc) or "memory escalation exhausted" in str(exc)):
+                if proof_path is not None and ("limit exhausted" in str(exc).lower()
+                                               or "memory escalation exhausted" in str(exc)):
                     import hashlib
                     store.update_task_state(cid, tid, {"state": "failed", "after_attempt_id": attempt["attempt_id"],
                         "reason": "retry_exhausted", "terminal_retry_failure": {
@@ -389,6 +439,7 @@ def retry_ready_failures(store, config, campaigns):
             # Retire only this exact terminal occurrence; unrelated HQ siblings stay.
             for intent in intents:
                 if (intent.get("backend") == "hq" and intent.get("campaign_id") == cid
+                        and intent.get("token") == state.get("submission_token")
                         and tid in intent.get("task_ids", [])):
                     intent["retired_task_ids"] = sorted(set(intent.get("retired_task_ids", [])) | {tid})
                     store.put_intent(intent)

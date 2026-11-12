@@ -100,7 +100,14 @@ For a finite batch, opt in with `control.stop_when_complete: true`. With early d
 
 - **Immutable tasks.** An import snapshots command bytes and settings. Re-importing the same thing is idempotent. Duplicate lines are still separate tasks. Changed inputs become a new generation.
 - **Success means validated.** A finished Slurm allocation does not mean its commands succeeded. Each task gets durable attempt records, and completion requires exit 0 plus any configured output checks. The API supports expected files, minimum sizes, validator commands and output modes.
-- **Bounded retries.** The default is one attempt. `hhq retry CAMPAIGN --failed` never raises the attempt bound you set at import. Interrupted work is replayed only when its output policy, repeatability and positive termination evidence allow it.
+- **Bounded retries.** New CLI submissions default to three application attempts,
+  three separately counted infrastructure retries, and a stop after two matching
+  application-error signatures. Configure these with `--max-attempts`,
+  `--infrastructure-retries`, and `--same-error-limit` (0 disables the signature
+  cutoff). Replay still requires `--repeatable` or appropriate isolated outputs;
+  ambiguous interrupted work requires repeatability and positive termination
+  evidence. Existing task policies and the Python API's legacy defaults stay
+  unchanged. `hhq retry CAMPAIGN --failed` never raises an imported attempt bound.
 - **Uncertainty fails closed.** A submission that Slurm may have accepted without acknowledging stays reserved until it is reconciled; `hhq` never blindly submits a second copy. Stale heartbeats never authorize takeover.
 
 ## Recovery

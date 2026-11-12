@@ -1,5 +1,18 @@
 # Validation record — 2026-10-12
 
+## November 11 — bounded retry recovery
+
+The focused baseline passed 42 tests in 6.86 seconds. After the changes, 133
+focused tests passed in 8.09 seconds and the complete non-cluster CPU suite,
+including local pinned HyperQueue tests, passed **701 tests in 49.97 seconds**.
+Ruff and diff checks passed, with independent read-only review. Runs were serial,
+limited to one numerical-library thread, capped at 768 MiB with swap disabled,
+and bounded to less than one minute per command. No Slurm allocations or scientific
+work were launched. New fixtures cover separate retry budgets, matching-error
+cutoff, legacy identity, prestart worker loss, interrupted retirement, terminal
+ownership matching and preservation of validated success. Live cluster preemption
+and recovery under the new code remain separate qualifications.
+
 ## Current combined regression check — October 14
 
 The merged AF3 compatibility profiles, constraint-composition fix, cached access

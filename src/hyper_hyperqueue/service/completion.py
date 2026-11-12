@@ -10,15 +10,19 @@ import dataclasses
 import time
 from collections import Counter
 
+from ..retry_policy import retry_budget_error
 from ..state import atomic_json, read_json
 
 
 def _cancellation_retry_pending(store, task, attempts):
-    if not attempts or len(attempts) >= task.retry.max_attempts:
+    if not attempts:
         return False
     from ..runner import attempt_epoch, internal_fencing_evidence
 
     current = read_json(store.campaign_dir(task.campaign_id) / "task_states" / f"{task.task_id}.json")
+    if retry_budget_error(store.task(task.campaign_id, task.task_id), attempts, current,
+                          infrastructure_attempt=attempts[-1]["attempt_id"]):
+        return False
     if current.get("state", current.get("status")) == "canceled":
         return False  # Explicit user cancellation is terminal.
     previous = attempts[-1]
@@ -88,7 +92,7 @@ def work_status(store, retry_decisions=()):
                     if not terminal_failure_valid(store, task, current):
                         reason = "missing_final_failure"
                 elif (current.get("reason") in task.retry.reasons
-                      and len(attempts) < task.retry.max_attempts and tid not in decided):
+                       and not retry_budget_error(task, attempts, current) and tid not in decided):
                     reason = "retry_decision_pending"
             elif state == "canceled":
                 task = store.task(cid, tid)

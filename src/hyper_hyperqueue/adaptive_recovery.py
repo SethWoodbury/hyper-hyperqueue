@@ -246,6 +246,16 @@ def effective_config(store, config, tasks):
 
 def terminal_failure_valid(store, task, state):
     """A bounded, exhausted retry may settle a resultless but proven-dead attempt."""
+    if state.get("prestart_terminal_failure"):
+        from .retry_policy import retry_budget_error, unstarted_loss_proof
+
+        try:
+            binding = state["prestart_terminal_failure"]
+            dispatch, proof_hash, tokens = unstarted_loss_proof(store, task, state, binding["worker_tokens"])
+            return (binding == {"dispatch": dispatch, "proof_sha256": proof_hash, "worker_tokens": tokens}
+                    and retry_budget_error(task, [], state, prestart_dispatch=dispatch) is not None)
+        except (ValueError, KeyError, OSError):
+            return False
     binding = state.get("terminal_retry_failure", {})
     previous = state.get("latest_attempt", {})
     if not binding or binding.get("attempt_id") != previous.get("attempt_id"):
@@ -254,6 +264,8 @@ def terminal_failure_valid(store, task, state):
     try:
         if hashlib.sha256(path.read_bytes()).hexdigest() != binding["evidence_sha256"]:
             return False
-        return verified_scheduler_proof(store, task, previous, path) is not None
+        from .runner import internal_fencing_evidence
+        return (verified_scheduler_proof(store, task, previous, path) is not None
+                or bool(internal_fencing_evidence(store, task, previous, path)))
     except (OSError, ValueError, KeyError):
         return False
